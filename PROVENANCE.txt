@@ -1,0 +1,8 @@
+﻿Portex provenance
+=================
+
+Original R4OS application, created in the 0.89.43 development step.
+Build launchers follow the canonical SDK-owned module launcher contract.
+Native initial window follows the SDK's hosted-window entry pattern.
+The catalog consumes the R4OS Server 0.5.71 schema-1 software contract.
+No server implementation, credentials or third-party UI runtime is embedded.

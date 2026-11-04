@@ -1,0 +1,48 @@
+﻿Portex - native Softwareverwaltung
+==================================
+
+Besitzer und Stand
+------------------
+Portex ist eine eigenständige App. R4OS Server liefert Katalog und geprüfte
+Originalassets. Die gemeinsame Registrierung gehört R4SRV; wirkende
+Installation, Systemziele, Journale, Rollback und Bootaktivierung bleiben
+bei UPDSVC/SYSUPD und der gemeinsamen Update-Engine.
+
+0.89.43 stellt das Projekt, das typisierte Paket-/Bindungsmodell und
+generationstreue UI-Auftragsbeobachtung bereit. Netzwerk und die bestätigte
+Prisma-GUI folgen in ihren Roadmap-Schritten. IMAGE_SCOPE=none verhindert
+die vorzeitige Auslieferung dieser Entwicklungsoberfläche. Slim/Full werden
+im abschließenden Integrationsschritt aktiviert.
+
+Paketvertrag
+------------
+Schema 1 unterscheidet application/R4X, library/R4L und kernel/ELF.
+package_id bleibt unabhängig von Anzeigename und Serverpfad. Release-/Asset-IDs
+bleiben Dezimalstrings, auch jenseits der uint64-/JavaScript-Zahlenbereiche.
+Das einzige artifact-Asset bestimmt Originalname, Größe und SHA256.
+Der Verzeichnisvorschlag einer App ist etwas anderes als das konkrete
+Dateiziel einer Library. Für den Kernel muss der Bootbesitzer einen Plan
+liefern. Portex errät keinen Kernelpfad.
+
+Installationszuordnung
+---------------------
+Die gespeicherte Katalogbindung enthält Paketart, technische Identität,
+Version, konkrete Release-/Asset-ID, geprüften Hash, tatsächlichen Dateipfad
+und nachgewiesene eigene Links. Sie ist kein zweites Komponenteninventar.
+Die Anzeige installiert verlangt den Abgleich mit dem realen Komponentenbestand.
+Fehlende oder abweichende Einträge bleiben unbestätigt. Ein alter Katalog,
+ein neuer Anzeigename oder ein geänderter Servervorschlag verschiebt keine
+bestehende Installation. Vorhandene Pfade gewinnen auch vor Anpassen.
+
+UI-Aufträge und Produktgrenzen
+-----------------------------
+UI-Beobachtungen sind an Request, Prozess und Generation gebunden. Eine
+Cancel-Anforderung ist kein bestätigter Installationsabbruch. Der bestehende
+Updatebesitzer muss tatsächliche Backend-Auftragskennung und Zustand liefern;
+stageiert, Neustart ausstehend und installiert bleiben getrennt.
+
+Keine neuen Dependency-/ABI-/SDK-/OS-Vorprüfungen und keine automatische
+Nachinstallation von Abhängigkeiten. TLS, Format-, Größen-/Hashprüfung,
+Zielbindung, Prozesslebenszeit und bestehende Bootverträge bleiben bestehen.
+App-Nutzerdaten und Begleitdateien werden vorerst nicht verwaltet. Spätere
+Systemupdates für Einstellungen/Definitionsdaten sind ein getrennter Bereich.
