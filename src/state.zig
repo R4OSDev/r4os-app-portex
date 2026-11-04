@@ -18,19 +18,19 @@ comptime {
 }
 
 pub fn load(files: anytype, allocator: std.mem.Allocator, path: []const u8) !std.json.Parsed(model.Bindings) {
-    const bytes = try read(files, allocator, path);
+    const bytes = try readBytes(files, allocator, path, max_bytes);
     defer if (bytes) |b| allocator.free(b);
     return model.Bindings.parse(allocator, bytes orelse "{\"schema_version\":1,\"bindings\":[]}");
 }
 
-fn read(files: anytype, allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
+pub fn readBytes(files: anytype, allocator: std.mem.Allocator, path: []const u8, limit: usize) !?[]u8 {
     const parsed_path = try r4os.AbsoluteFilePath.parse(path);
     const info = switch (files.info(parsed_path.asZ())) {
         .value => |v| v,
         .missing => return null,
         .failure => return error.BindingRead,
     };
-    if (info.is_dir != 0 or info.size == 0 or info.size > max_bytes) return error.BindingSize;
+    if (info.is_dir != 0 or info.size == 0 or info.size > limit) return error.BindingSize;
     const bytes = try allocator.alloc(u8, @intCast(info.size));
     errdefer allocator.free(bytes);
     const count = switch (files.read(parsed_path.asZ(), bytes)) {
@@ -44,15 +44,24 @@ fn read(files: anytype, allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
 pub fn save(files: anytype, allocator: std.mem.Allocator, path: []const u8, value: model.Bindings) !void {
     const bytes = try value.encode(allocator);
     defer allocator.free(bytes);
-    if (bytes.len > max_bytes) return error.BindingSize;
+    try writeBytes(files, allocator, path, bytes, max_bytes);
+}
+
+pub fn writeBytes(files: anytype, allocator: std.mem.Allocator, path: []const u8, bytes: []const u8, limit: usize) !void {
+    if (bytes.len == 0 or bytes.len > limit) return error.BindingSize;
     const target = try r4os.AbsoluteFilePath.parse(path);
-    const staged_name = try std.fmt.allocPrint(allocator, "{s}.NEW", .{path});
+    // The native atomic owner requires short stage/backup names on every
+    // volume. Replace the extension rather than appending a second one.
+    const base = std.mem.lastIndexOfScalar(u8, path, '\\') orelse return error.BindingPath;
+    const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse path.len;
+    const stem = path[0..if (dot > base) dot else path.len];
+    const staged_name = try std.fmt.allocPrint(allocator, "{s}.NEW", .{stem});
     defer allocator.free(staged_name);
-    const backup_name = try std.fmt.allocPrint(allocator, "{s}.BAK", .{path});
+    const backup_name = try std.fmt.allocPrint(allocator, "{s}.BAK", .{stem});
     defer allocator.free(backup_name);
     const staged = try r4os.AbsoluteFilePath.parse(staged_name);
     const backup = try r4os.AbsoluteFilePath.parse(backup_name);
-    const leftover = try read(files, allocator, staged_name);
+    const leftover = try readBytes(files, allocator, staged_name, limit);
     if (leftover) |old| {
         defer allocator.free(old);
         // Recover an identical completed stage; never replace foreign bytes.
@@ -70,7 +79,7 @@ pub fn save(files: anytype, allocator: std.mem.Allocator, path: []const u8, valu
         complete = true;
     }
     if (files.replaceAtomic(target.asZ(), staged.asZ(), backup.asZ(), .{}) != .ok) return error.BindingCommit;
-    const observed = (try read(files, allocator, path)) orelse return error.BindingReadback;
+    const observed = (try readBytes(files, allocator, path, limit)) orelse return error.BindingReadback;
     defer allocator.free(observed);
     if (!std.mem.eql(u8, observed, bytes)) return error.BindingReadback;
 }

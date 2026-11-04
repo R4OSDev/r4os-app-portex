@@ -83,16 +83,20 @@ pub const Catalog = struct {
     pub fn parse(allocator: Allocator, bytes: []const u8) !std.json.Parsed(Catalog) {
         const parsed = try std.json.parseFromSlice(Catalog, allocator, bytes, .{ .allocate = .alloc_always, .ignore_unknown_fields = true });
         errdefer parsed.deinit();
-        if (parsed.value.schema_version != 1) return error.UnsupportedSchema;
-        for (parsed.value.packages, 0..) |p, n| {
-            try p.validate();
-            for (parsed.value.packages[0..n]) |old| if (std.mem.eql(u8, old.package_id, p.package_id)) return error.DuplicatePackage;
-        }
-        for (parsed.value.unavailable) |p| {
-            if (!token(p.package_id) or !label(p.reason)) return error.InvalidUnavailable;
-            for (parsed.value.packages) |available| if (std.mem.eql(u8, available.package_id, p.package_id)) return error.PackageAvailabilityConflict;
-        }
+        try parsed.value.validate();
         return parsed;
+    }
+
+    pub fn validate(self: Catalog) !void {
+        if (self.schema_version != 1) return error.UnsupportedSchema;
+        for (self.packages, 0..) |p, n| {
+            try p.validate();
+            for (self.packages[0..n]) |old| if (std.mem.eql(u8, old.package_id, p.package_id)) return error.DuplicatePackage;
+        }
+        for (self.unavailable) |p| {
+            if (!token(p.package_id) or !label(p.reason)) return error.InvalidUnavailable;
+            for (self.packages) |available| if (std.mem.eql(u8, available.package_id, p.package_id)) return error.PackageAvailabilityConflict;
+        }
     }
 
     pub fn find(self: Catalog, id: []const u8) ?*const Package {

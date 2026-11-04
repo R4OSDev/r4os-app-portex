@@ -5,8 +5,10 @@ software catalog and uses the shared installation/update owners.
 
 The first development step provides typed application, runtime-library and
 kernel packages, lossless server IDs, catalog-to-installation bindings and
-generation-bound UI job observations. Server access and the Prisma GUI are
-subsequent roadmap steps. The app is not shipped by normal images yet.
+generation-bound UI job observations. Software access reuses R4SRV registration and verified HTTPS, with an
+ETag-bound durable catalog cache. The Prisma GUI follows its shared SDK
+groundwork. The app is not shipped by normal images yet. From SSH, use
+`DESKRUN` to start its GUI in the existing Desktop.
 
 Build with `./Build.sh` on Linux or `Build.bat` on Windows. Both delegate to
 the selected SDK. Run the owner tests with the same starter and `test`.

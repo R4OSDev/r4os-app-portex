@@ -9,8 +9,9 @@ Installation, Systemziele, Journale, Rollback und Bootaktivierung bleiben
 bei UPDSVC/SYSUPD und der gemeinsamen Update-Engine.
 
 0.89.43 stellt das Projekt, das typisierte Paket-/Bindungsmodell und
-generationstreue UI-Auftragsbeobachtung bereit. Netzwerk und die bestätigte
-Prisma-GUI folgen in ihren Roadmap-Schritten. IMAGE_SCOPE=none verhindert
+generationstreue UI-Auftragsbeobachtung bereit. 0.89.44 ergänzt den
+Softwarekatalog über R4SRV und verifiziertes HTTPS. Die bestätigte
+Prisma-GUI folgt auf die gemeinsame SDK-Grundlage. IMAGE_SCOPE=none verhindert
 die vorzeitige Auslieferung dieser Entwicklungsoberfläche. Slim/Full werden
 im abschließenden Integrationsschritt aktiviert.
 
@@ -46,3 +47,20 @@ Nachinstallation von Abhängigkeiten. TLS, Format-, Größen-/Hashprüfung,
 Zielbindung, Prozesslebenszeit und bestehende Bootverträge bleiben bestehen.
 App-Nutzerdaten und Begleitdateien werden vorerst nicht verwaltet. Spätere
 Systemupdates für Einstellungen/Definitionsdaten sind ein getrennter Bereich.
+
+Serverkatalog ab 0.89.44
+----------------------
+Das AppCenter-Ziel wird unverändert aus der Registry gelesen; PUBLIC/LAN
+bleibt explizit. Registrierung und CA-Vertrauen liegen bei den bestehenden
+R4OS-Serverbesitzern. Software-Reads senden keinen Bearer und verlangen die
+konfigurierte HTTPS-Adresse ohne Redirect. Aus SSH startet DESKRUN die App
+im vorhandenen Desktop. In der Entwicklungs-GUI läuft er in einem nativen
+Worker, der vor dem Freigeben seiner Puffer tatsächlich gejoint wird.
+
+CATALOG.JSON enthält Ursprung, Profil, gültigen ETag und vollständiges
+Schema-1-Dokument in einer atomar ersetzten Datei. 304 setzt einen passenden
+validierten Cache voraus. Fehler behalten die letzte Ansicht als veraltet;
+200 mit leerer Paketliste ist dagegen ein gültiger leerer Serverkatalog.
+401 registration_required registriert höchstens einmal neu, 403 stoppt,
+429/503 wiederholen höchstens dreimal mit 250/500/1000 ms Verzögerung.
+Fehlender Katalog oder unavailable bedeutet niemals Deinstallation.

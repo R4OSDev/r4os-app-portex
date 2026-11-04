@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "packages": [
+    {
+      "package_id": "gh-1-MINESWEEPER_665F9DD0",
+      "package_type": "application",
+      "target": "MINESWEEPER_665F9DD0",
+      "format": "R4X",
+      "display_name": "MINESWEEPER_665F9DD0",
+      "description": "",
+      "category": "Undefined",
+      "version": "0.1.0",
+      "release": {
+        "id": "11",
+        "tag": "v0.1.0",
+        "commit": "fe753b23556364128df95d2ef135d87743e9d4a7"
+      },
+      "installation": {
+        "role": "application",
+        "path": "C:\\Software\\MINESWEEPER_665F9DD0",
+        "path_kind": "directory",
+        "activation": "client_managed",
+        "requires_client_plan": false
+      },
+      "compatibility": {
+        "architecture": null,
+        "abi": null,
+        "os_version": null,
+        "sdk_profile": {
+          "sdk_id": "fixture-sdk",
+          "sdk_version": null,
+          "profile": null
+        }
+      },
+      "runtime_dependencies": [
+        {
+          "module_id": "R4IMG",
+          "symbol": "Query",
+          "abi_version": 1,
+          "package_id": "gh-2-R4IMG"
+        }
+      ],
+      "declared_imports": [
+        "R4IMG:Query:1"
+      ],
+      "provides": null,
+      "assets": [
+        {
+          "asset_id": "11467990",
+          "name": "MINESWEEPER_665F9DD0.R4X",
+          "role": "artifact",
+          "size_bytes": 28,
+          "sha256": "9501f731ae15eee76b4b07f0d841c1e0248f10d3f93840017ecdc5f74f73c7e7",
+          "download_url": "/api/v1/packages/gh-1-MINESWEEPER_665F9DD0/files/11467990"
+        },
+        {
+          "asset_id": "11467991",
+          "name": "MINESWEEPER_665F9DD0.sha256",
+          "role": "checksums",
+          "size_bytes": 91,
+          "sha256": "b39c1e6b1b0a3791d81adfe34918924fd7db2222f02b7a66c58c92babeafd57e",
+          "download_url": "/api/v1/packages/gh-1-MINESWEEPER_665F9DD0/files/11467991"
+        },
+        {
+          "asset_id": "11467992",
+          "name": "r4os-build-MINESWEEPER_665F9DD0.json",
+          "role": "build_receipt",
+          "size_bytes": 572,
+          "sha256": "478006599dd5de74a3bc176625f9f6a0d1b09982480bc2eb81aee5ff7ac0433b",
+          "download_url": "/api/v1/packages/gh-1-MINESWEEPER_665F9DD0/files/11467992"
+        }
+      ]
+    },
+    {
+      "package_id": "gh-2-R4IMG",
+      "package_type": "library",
+      "target": "R4IMG",
+      "format": "R4L",
+      "display_name": "R4IMG",
+      "description": "",
+      "category": "Undefined",
+      "version": "0.1.0",
+      "release": {
+        "id": "11",
+        "tag": "v0.1.0",
+        "commit": "fe753b23556364128df95d2ef135d87743e9d4a7"
+      },
+      "installation": {
+        "role": "runtime_library",
+        "path": "/R4OS/LIBS/R4IMG.R4L",
+        "path_kind": "file",
+        "activation": "client_managed",
+        "requires_client_plan": false
+      },
+      "compatibility": {
+        "architecture": null,
+        "abi": null,
+        "os_version": null,
+        "sdk_profile": {
+          "sdk_id": "fixture-sdk",
+          "sdk_version": null,
+          "profile": null
+        }
+      },
+      "runtime_dependencies": [],
+      "declared_imports": [],
+      "provides": {
+        "module_id": "R4IMG",
+        "exports": [
+          {
+            "symbol": "Query",
+            "abi_version": 1
+          }
+        ]
+      },
+      "assets": [
+        {
+          "asset_id": "11090270",
+          "name": "R4IMG.R4L",
+          "role": "artifact",
+          "size_bytes": 28,
+          "sha256": "9501f731ae15eee76b4b07f0d841c1e0248f10d3f93840017ecdc5f74f73c7e7",
+          "download_url": "/api/v1/packages/gh-2-R4IMG/files/11090270"
+        },
+        {
+          "asset_id": "11090271",
+          "name": "R4IMG.sha256",
+          "role": "checksums",
+          "size_bytes": 76,
+          "sha256": "6d995e12a3cece3e215ee6271ba9aba782ed14852e907569f5814ecd6aab4cde",
+          "download_url": "/api/v1/packages/gh-2-R4IMG/files/11090271"
+        },
+        {
+          "asset_id": "11090272",
+          "name": "r4os-build-R4IMG.json",
+          "role": "build_receipt",
+          "size_bytes": 527,
+          "sha256": "90a240c014f4e8ca984bb74e09e7c33a1e47174693d64bf048bd89ced9aa324a",
+          "download_url": "/api/v1/packages/gh-2-R4IMG/files/11090272"
+        }
+      ]
+    },
+    {
+      "package_id": "gh-3-kernel",
+      "package_type": "kernel",
+      "target": "kernel",
+      "format": "ELF",
+      "display_name": "Production kernel",
+      "description": "",
+      "category": "Undefined",
+      "version": "0.1.0",
+      "release": {
+        "id": "11",
+        "tag": "v0.1.0",
+        "commit": "fe753b23556364128df95d2ef135d87743e9d4a7"
+      },
+      "installation": {
+        "role": "boot_kernel",
+        "path": null,
+        "path_kind": "file",
+        "activation": "boot_configuration",
+        "requires_client_plan": true
+      },
+      "compatibility": {
+        "architecture": null,
+        "abi": null,
+        "os_version": null,
+        "sdk_profile": {
+          "sdk_id": "fixture-sdk",
+          "sdk_version": null,
+          "profile": null
+        }
+      },
+      "runtime_dependencies": null,
+      "declared_imports": null,
+      "provides": null,
+      "assets": [
+        {
+          "asset_id": "11269151",
+          "name": "kernel.sha256",
+          "role": "checksums",
+          "size_bytes": 75,
+          "sha256": "dc6689ffebfa0d12ab609d25382972a3a1aa1f59e66cc10c93f0fd09395f491d",
+          "download_url": "/api/v1/packages/gh-3-kernel/files/11269151"
+        },
+        {
+          "asset_id": "11269152",
+          "name": "r4os-build-kernel.json",
+          "role": "build_receipt",
+          "size_bytes": 528,
+          "sha256": "6266eca79e5df1645ca91a5cd6f4b18828c90985a4760be1fe99f2598795091b",
+          "download_url": "/api/v1/packages/gh-3-kernel/files/11269152"
+        },
+        {
+          "asset_id": "11269150",
+          "name": "r4os.elf",
+          "role": "artifact",
+          "size_bytes": 28,
+          "sha256": "9501f731ae15eee76b4b07f0d841c1e0248f10d3f93840017ecdc5f74f73c7e7",
+          "download_url": "/api/v1/packages/gh-3-kernel/files/11269150"
+        }
+      ]
+    }
+  ],
+  "unavailable": []
+}

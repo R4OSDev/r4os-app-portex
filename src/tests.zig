@@ -4,6 +4,9 @@ const j = @import("job.zig");
 const allocator = std.testing.allocator;
 const sha = "a" ** 64;
 const state = @import("state.zig");
+const client = @import("catalog_client.zig");
+const cache = @import("catalog_cache.zig");
+const policy = @import("catalog_policy.zig");
 
 fn package() m.Package {
     return .{ .package_id = "gh-123-APP", .package_type = .application, .target = "APP", .format = .R4X, .display_name = "A new name", .category = "Tools", .version = "0.1.10", .release = .{ .id = "18446744073709551617", .tag = "v0.1.10", .commit = "b" ** 40 }, .installation = .{ .role = .application, .path = "C:\\Changed", .path_kind = .directory, .activation = .client_managed, .requires_client_plan = false }, .assets = &.{.{ .asset_id = "18446744073709551618", .name = "APP.R4X", .role = "artifact", .size_bytes = 12, .sha256 = sha, .download_url = "/api/v1/packages/gh-123-APP/files/18446744073709551618" }} };
@@ -78,8 +81,8 @@ test "cancel requests and stale worker receipts cannot report durable installati
 }
 
 const Disk = struct {
-    current: [4096]u8 = undefined,
-    stage: [4096]u8 = undefined,
+    current: [32768]u8 = undefined,
+    stage: [32768]u8 = undefined,
     current_len: usize = 0,
     stage_len: usize = 0,
     fail_commit: bool = false,
@@ -118,7 +121,15 @@ const Disk = struct {
     pub fn streamWriter(self: *Disk, _: anytype, _: u32) union(enum) { writer: Writer, failure: i32 } {
         return .{ .writer = .{ .disk = self } };
     }
-    pub fn replaceAtomic(self: *Disk, _: anytype, _: anytype, _: anytype, _: struct {}) enum { ok, failure } {
+    pub fn replaceAtomic(self: *Disk, _: anytype, stage_path: anytype, backup_path: anytype, _: struct {}) enum { ok, failure } {
+        // Preserve the real atomic owner's stage/backup short-name contract.
+        for ([_][]const u8{ stage_path.bytes(), backup_path.bytes() }) |path| {
+            const start = (std.mem.lastIndexOfScalar(u8, path, '\\') orelse return .failure) + 1;
+            const name = path[start..];
+            const dot = std.mem.indexOfScalar(u8, name, '.') orelse return .failure;
+            if (dot == 0 or dot > 8 or name.len - dot - 1 > 3 or
+                std.mem.indexOfScalar(u8, name[dot + 1 ..], '.') != null) return .failure;
+        }
         if (self.fail_commit) return .failure;
         @memcpy(self.current[0..self.stage_len], self.stage[0..self.stage_len]);
         self.current_len = self.stage_len;
@@ -145,4 +156,115 @@ test "binding storage preserves old data on failed commit and resumes its exact 
     const reopened = try state.load(&disk, allocator, state.default_path);
     defer reopened.deinit();
     try std.testing.expectEqualStrings(binding().actual_path, reopened.value.find(binding().package_id).?.actual_path);
+}
+
+const empty_catalog = "{\"schema_version\":1,\"packages\":[],\"unavailable\":[]}";
+const example_catalog = @embedFile("Fixtures/catalog-schema1.json");
+const FakeTransport = struct {
+    statuses: []const u16,
+    body: []const u8 = empty_catalog,
+    calls: usize = 0,
+    auth: usize = 0,
+    forced: usize = 0,
+    delayed: usize = 0,
+    conditional: usize = 0,
+    stop: bool = false,
+
+    pub fn origin(_: *FakeTransport) []const u8 {
+        return "https://138.201.253.143:4022";
+    }
+    pub fn profileName(_: *FakeTransport) []const u8 {
+        return "public";
+    }
+    pub fn cancelled(self: *FakeTransport) bool {
+        return self.stop;
+    }
+    pub fn authenticate(self: *FakeTransport, force: bool) ?client.Failure {
+        self.auth += 1;
+        if (force) self.forced += 1;
+        return null;
+    }
+    pub fn fetch(self: *FakeTransport, etag: ?[]const u8) client.Fetch {
+        if (etag != null) self.conditional += 1;
+        const code = self.statuses[@min(self.calls, self.statuses.len - 1)];
+        self.calls += 1;
+        return .{ .response = .{ .status = code, .body = if (code == 401) "{\"error\":\"registration_required\"}" else self.body, .headers = "ETag: \"catalog-v1\"\r\n", .content_type = "application/json", .secure = true } };
+    }
+    pub fn delay(self: *FakeTransport, _: u32) void {
+        self.delayed += 1;
+    }
+};
+
+test "real schema-1 fixture retains apps, libraries, kernel and persists an origin-bound catalog" {
+    var transport = FakeTransport{ .statuses = &.{200}, .body = example_catalog };
+    var result = try client.retrieve(&transport, allocator, null);
+    defer result.deinit();
+    try std.testing.expect(result.failure == null);
+    const snapshot = &result.snapshot.?;
+    try std.testing.expect(snapshot.fresh and !snapshot.cached);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.catalog.packages.len);
+    try std.testing.expectEqual(m.Kind.application, snapshot.catalog.packages[0].package_type);
+    try std.testing.expectEqual(m.Kind.library, snapshot.catalog.packages[1].package_type);
+    try std.testing.expectEqual(m.Kind.kernel, snapshot.catalog.packages[2].package_type);
+    var disk: Disk = .{};
+    try snapshot.save(&disk, allocator);
+    var reopened = (try cache.Snapshot.load(&disk, allocator, transport.origin(), transport.profileName())).?;
+    defer reopened.deinit();
+    try std.testing.expectEqualStrings(snapshot.body, reopened.body);
+    try std.testing.expect(!reopened.fresh and reopened.cached);
+    try std.testing.expect(try cache.Snapshot.load(&disk, allocator, "https://172.27.254.3:4022", "lan") == null);
+}
+
+test "304 requires the actual validated conditional cache and remains a successful empty catalog" {
+    var transport = FakeTransport{ .statuses = &.{304} };
+    var previous = try cache.Snapshot.init(allocator, transport.origin(), transport.profileName(), "\"catalog-v1\"", empty_catalog);
+    previous.fresh = true;
+    var result = try client.retrieve(&transport, allocator, previous);
+    defer result.deinit();
+    try std.testing.expect(result.failure == null and result.snapshot.?.fresh and result.snapshot.?.cached);
+    try std.testing.expectEqual(@as(usize, 1), transport.conditional);
+    var missing = try client.retrieve(&transport, allocator, null);
+    defer missing.deinit();
+    try std.testing.expectEqual(client.Reason.invalid_cache, missing.failure.?.reason);
+    try std.testing.expect(missing.snapshot == null);
+}
+
+test "401 repeats registration once while 403 never forces registration or discards cached software" {
+    var transport = FakeTransport{ .statuses = &.{ 401, 200 } };
+    var success = try client.retrieve(&transport, allocator, null);
+    defer success.deinit();
+    try std.testing.expect(success.failure == null);
+    try std.testing.expectEqual(@as(usize, 1), transport.forced);
+    transport = .{ .statuses = &.{ 401, 401 } };
+    var denied = try client.retrieve(&transport, allocator, null);
+    defer denied.deinit();
+    try std.testing.expectEqual(@as(usize, 2), transport.calls);
+    try std.testing.expectEqual(@as(usize, 1), transport.forced);
+    transport = .{ .statuses = &.{403} };
+    var previous = try cache.Snapshot.init(allocator, transport.origin(), transport.profileName(), "\"catalog-v1\"", example_catalog);
+    previous.fresh = true;
+    var blocked = try client.retrieve(&transport, allocator, previous);
+    defer blocked.deinit();
+    try std.testing.expectEqual(client.Reason.blocked, blocked.failure.?.reason);
+    try std.testing.expectEqual(@as(usize, 0), transport.forced);
+    try std.testing.expect(!blocked.snapshot.?.fresh and blocked.snapshot.?.catalog.packages.len == 3);
+}
+
+test "rate limits, outages and invalid replacement bodies preserve the last good catalog with bounded attempts" {
+    var transport = FakeTransport{ .statuses = &.{ 429, 503, 503, 503 } };
+    var previous = try cache.Snapshot.init(allocator, transport.origin(), transport.profileName(), "\"catalog-v1\"", example_catalog);
+    var outage = try client.retrieve(&transport, allocator, previous);
+    defer outage.deinit();
+    try std.testing.expectEqual(@as(usize, 4), transport.calls);
+    try std.testing.expectEqual(@as(usize, 3), transport.delayed);
+    try std.testing.expectEqual(client.Reason.server_error, outage.failure.?.reason);
+    try std.testing.expectEqualStrings(example_catalog, outage.snapshot.?.body);
+    transport = .{ .statuses = &.{200}, .body = "{}" };
+    previous = try cache.Snapshot.init(allocator, transport.origin(), transport.profileName(), "\"catalog-v1\"", example_catalog);
+    var invalid = try client.retrieve(&transport, allocator, previous);
+    defer invalid.deinit();
+    try std.testing.expectEqual(client.Reason.invalid_catalog, invalid.failure.?.reason);
+    try std.testing.expectEqualStrings(example_catalog, invalid.snapshot.?.body);
+    try std.testing.expect(!policy.validEtag("\"ok\"\r\nInjected:yes"));
+    try std.testing.expect(policy.header("ETag: \"a\"\nETag: \"b\"\n", "etag") == null);
 }
