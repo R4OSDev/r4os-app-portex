@@ -62,7 +62,7 @@ gemeinsame SDK-Update-Engine. Diese erstellt einen lokalen R4U-Umschlag und
 verwendet ihre bestehenden SYSLOCK-, Journal-, Inventar- und Rollbackpfade.
 Neue Ziele sind create-only; vorhandene Dateien brauchen eine explizite,
 erneut gepruefte technische Identitaet und alte Hashbindung. Laufende Apps
-werden vom bestehenden Backend abgewiesen. Es gibt keine Dependency- oder
+verwenden ab0.89.52 den bestehenden Neustartpfad. Es gibt keine Dependency- oder
 Versionsvorpruefung zusaetzlich zum normalen Format-/Loadervertrag.
 
 JOB.JSON bindet den Auftrag vor der Dateiwirkung dauerhaft an Quelle und
@@ -111,6 +111,23 @@ bestehende Installation. Vorhandene Pfade gewinnen auch vor Anpassen.
 
 UI-Aufträge und Produktgrenzen
 -----------------------------
+Ab0.89.52 werden R4L und Kernel-ELF ueber den gemeinsamen R4U-Adapter
+vorbereitet. Die Library verwendet ihr konkretes Systemziel ohne App-Link.
+Der SDK-Bootbesitzer liest fuer Kernel den vorhandenen Installationsplan
+und die normalen Limine-Eintraege; geaenderte oder unbekannte Bindungen
+stoppen vor Aktivierung. Originalquelle und alte Zieldatei werden geprueft.
+Neustart starten ist eine zweite ausdrueckliche Nutzeraktion, die nur den
+eigenen Assetbatch aktivieren darf. Wiedereroeffnen bestaetigt Abschluss
+erst mit passendem installiertem Backendbeleg, echter Datei und Inventar.
+Ein einzelnes Asset erhoeht den R4OS-Releasewert nicht.
+
+Downloads buendeln kleine Fragmente in 64-KB-Schreibgruppen. Akzeptierte
+Restbytes werden bei Transportabbruch bestaetigt; mehrdeutige Schreibfehler
+werden nicht doppelt angehaengt. Die gesamte HTTP-Frist betraegt120 Sekunden
+zuzueglich Restgroesse/16KB pro Sekunde, auf eine Stunde pro Versuch begrenzt.
+Dies ist keine Leerlauffrist. Cancel und das gemeinsame Budget von drei
+Wiederholungen bleiben bestehen; der volle SHA-256-Readback bleibt Pflicht.
+
 UI-Beobachtungen sind an Request, Prozess und Generation gebunden. Eine
 Cancel-Anforderung ist kein bestätigter Installationsabbruch. Der bestehende
 Updatebesitzer muss tatsächliche Backend-Auftragskennung und Zustand liefern;

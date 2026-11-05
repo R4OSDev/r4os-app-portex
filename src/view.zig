@@ -3,7 +3,7 @@ const std = @import("std");
 const r = @import("r4os");
 const m = @import("model.zig");
 pub const Tab = enum { discover, installed, updates };
-pub const Status = enum { available, installed, update, unavailable, local, unverified, conflict };
+pub const Status = enum { available, installed, update, pending_restart, unavailable, local, unverified, conflict };
 pub const Row = struct {
     package_index: ?usize = null,
     package_id: []const u8,
@@ -23,6 +23,7 @@ pub const Row = struct {
             .available => "Verfuegbar",
             .installed => "Installiert",
             .update => "Update verfuegbar",
+            .pending_restart => "Fuer Neustart vorbereitet",
             .unavailable => "Serverpaket nicht verfuegbar",
             .local => "Lokal, ohne Katalogeintrag",
             .unverified => "Gespeicherte Zuordnung: Bestand pruefen",

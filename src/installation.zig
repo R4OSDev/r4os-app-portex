@@ -10,10 +10,12 @@ const catalog = @import("catalog_client.zig");
 const download = @import("download.zig");
 const job_path = "C:\\R4OS\\DATA\\PORTEX\\JOB.JSON";
 const lock_path: [*:0]const u8 = "C:\\R4OS\\DATA\\PORTEX\\INSTALL.LCK";
-pub const Phase = enum(u8) { downloading, recording, installing, linking, binding, installed, failed, cancelled };
+pub const Phase = enum(u8) { downloading, recording, installing, pending_restart, linking, binding, installed, failed, cancelled };
 pub const Progress = struct {
     phase: std.atomic.Value(u8) = .init(@intFromEnum(Phase.downloading)),
     cause: std.atomic.Value(u16) = .init(0),
+    backend_reason: [96]u8 = @splat(0),
+    backend_reason_len: usize = 0,
     fn set(self: *Progress, value: Phase) void {
         self.phase.store(@intFromEnum(value), .release);
     }
@@ -23,6 +25,7 @@ pub const Progress = struct {
             .downloading => "Originaldatei laden und pruefen",
             .recording => "Installationsauftrag sichern",
             .installing => "Update-Backend installiert",
+            .pending_restart => "Fuer Neustart vorbereitet; noch nicht aktiv",
             .linking => "Desktop-Verknuepfung erstellen",
             .binding => "Tatsaechlichen Bestand zuordnen",
             .installed => "Installation und Zuordnung bestaetigt",
@@ -30,6 +33,10 @@ pub const Progress = struct {
             .cancelled => "Vor der Installation abgebrochen",
         };
         const cause = self.cause.load(.acquire);
+        // Written before the failed phase's release publication. The UI
+        // reads these bytes only after observing that terminal phase.
+        if (phase == .failed and self.backend_reason_len != 0)
+            return std.fmt.bufPrint(buffer, "{s}: {s}", .{ self.backend_reason[0..self.backend_reason_len], label }) catch label;
         return if (cause == 0) label else std.fmt.bufPrint(buffer, "{s}: {s}", .{ @errorName(@errorFromInt(cause)), label }) catch label;
     }
 };
@@ -43,8 +50,9 @@ pub const Intent = struct {
     size: u64,
     sha256: []const u8,
     previous: ?backend.asset.Digest,
+    boot: ?backend.asset.system.BootProof = null,
     adopted: bool,
-    phase: enum { requested, committed, linked, completed } = .requested,
+    phase: enum { requested, pending_restart, committed, linked, completed } = .requested,
     backend_generation: u64 = 0,
     last_backend_reason: []const u8 = "",
     link_path: []const u8,
@@ -52,11 +60,16 @@ pub const Intent = struct {
     link_sha256: []const u8,
 
     fn plan(self: Intent) backend.asset.Plan {
-        return .{ .source = self.source, .target = self.destination, .name = self.catalog.target, .version = self.version, .size = self.size, .sha256 = self.sha256, .previous = self.previous };
+        return .{ .kind = componentKind(self.catalog.kind), .boot = self.boot, .source = self.source, .target = self.destination, .name = self.catalog.target, .version = self.version, .size = self.size, .sha256 = self.sha256, .previous = self.previous };
     }
     fn validate(self: Intent) !void {
-        if (self.schema != 1 or self.catalog.kind != .application or self.request.len != 64 or self.link_sha256.len != 64) return error.InstallIntentInvalid;
+        if (self.schema != 1 or self.request.len != 64) return error.InstallIntentInvalid;
         try backend.asset.validate(self.plan());
+        if (self.catalog.kind != .application) {
+            if (self.adopted or self.link_path.len != 0 or self.link_bytes.len != 0 or self.link_sha256.len != 0) return error.InstallLinkScope;
+            return;
+        }
+        if (self.link_sha256.len != 64) return error.InstallIntentInvalid;
         const link = try r.AbsoluteFilePath.parse(self.link_path);
         if (!std.ascii.startsWithIgnoreCase(link.bytes(), "C:\\R4OS\\DESKTOP\\") or !std.ascii.endsWithIgnoreCase(link.bytes(), ".LNK")) return error.InstallLinkScope;
         var parsed: shortcut.Shortcut = .{};
@@ -93,7 +106,10 @@ pub const Job = struct {
     destination: ?r.AbsoluteFilePath = null,
     title: []const u8 = "",
     adopt: bool = false,
+    replace: bool = false,
     resuming: bool = false,
+    commit_restart: bool = false,
+    reconcile_only: bool = false,
     progress: Progress = .{},
     failure: ?anyerror = null,
     receipt: ?backend.Result = null,
@@ -102,6 +118,11 @@ pub const Job = struct {
         const self: *Job = @ptrFromInt(raw);
         self.run() catch |err| {
             self.failure = err;
+            if (self.receipt) |*receipt| {
+                const reason = receipt.reasonText();
+                self.progress.backend_reason_len = @min(reason.len, self.progress.backend_reason.len);
+                @memcpy(self.progress.backend_reason[0..self.progress.backend_reason_len], reason[0..self.progress.backend_reason_len]);
+            }
             self.progress.cause.store(@intFromError(err), .release);
             self.progress.set(if (err == error.Cancelled) .cancelled else .failed);
             self.logFailure(err);
@@ -140,27 +161,44 @@ pub const Job = struct {
         defer if (saved) |value| value.deinit();
         if (self.resuming) {
             const old = saved orelse return error.InstallIntentMissing;
+            if (self.commit_restart) {
+                if (old.value.phase != .pending_restart) return error.AssetNotRestartReady;
+                var engine = backend.Engine.init(self.app);
+                const result = try engine.commitAsset(old.value.plan());
+                self.receipt = result;
+                if (result.exit_code != 0) {
+                    var failed = old.value;
+                    failed.last_backend_reason = result.reasonText();
+                    try saveIntent(&files, self.allocator, failed);
+                    return error.InstallBackendIncomplete;
+                }
+            }
             return self.execute(&files, old.value);
         }
-        const destination = self.destination orelse return error.InstallTarget;
         const dl = if (self.download_job) |*value| value else return error.InstallDownloadMissing;
-        const request = try std.json.Stringify.valueAlloc(self.allocator, .{ dl.plan, destination.bytes(), self.adopt }, .{});
+        const boot = if (dl.plan.kind == .kernel) try backend.asset.system.bootPlan(&ctx) else null;
+        const destination = if (dl.plan.kind == .kernel) backend.asset.system.kernel_target else if (self.destination) |*path| path.bytes() else return error.InstallTarget;
+        const request = try std.json.Stringify.valueAlloc(self.allocator, .{ dl.plan, destination, self.adopt, self.replace, boot }, .{});
         defer self.allocator.free(request);
         const request_hash = hash(request);
         if (saved) |value| {
             if (std.mem.eql(u8, value.value.request, &request_hash)) return self.execute(&files, value.value);
             if (value.value.phase != .completed) return error.InstallationPending;
         }
-        if (dl.plan.kind != .application) return error.InstallApplicationOnly;
-        const existing = switch (files.info(destination.asZ())) {
-            .value => true,
-            .missing => false,
-            .failure => return error.InstallTargetInfo,
-        };
-        if (existing and !self.adopt) return error.InstallTargetOccupied;
+        const existing = (try backend.asset.system.info(&ctx, destination)) != null;
+        if (existing and !self.adopt and !self.replace) return error.InstallTargetOccupied;
         if (!existing and self.adopt) return error.AssetMissing;
+        if (self.replace and !existing) return error.InstallTargetChanged;
+        var previous: ?backend.asset.Digest = null;
+        if (existing) {
+            const old_identity = try backend.asset.system.inspect(&ctx, destination);
+            if (old_identity.kind != componentKind(dl.plan.kind) or !std.ascii.eqlIgnoreCase(old_identity.nameText(), dl.plan.target)) return error.InstallIdentityMismatch;
+            const scratch = try self.allocator.alloc(u8, 64 * 1024);
+            defer self.allocator.free(scratch);
+            previous = try backend.asset.system.digest(&ctx, destination, scratch);
+        }
         var source: r.AbsoluteFilePath = undefined;
-        if (self.adopt) source = destination else {
+        if (self.adopt) source = try r.AbsoluteFilePath.parse(destination) else {
             _ = download.Job.entry(@intFromPtr(dl));
             if (dl.result.failure) |err| return err;
             source = dl.result.path orelse return error.InstallDownloadMissing;
@@ -170,36 +208,41 @@ pub const Job = struct {
         defer self.allocator.free(scratch);
         const observed = try backend.asset.digest(&files, source, scratch);
         const identity = try backend.asset.inspect(&files, source);
-        if (identity.kind != .r4x or !std.ascii.eqlIgnoreCase(identity.nameText(), dl.plan.target)) return error.InstallIdentityMismatch;
+        if (identity.kind != componentKind(dl.plan.kind) or !std.ascii.eqlIgnoreCase(identity.nameText(), dl.plan.target)) return error.InstallIdentityMismatch;
         if (!self.adopt and (!backend.asset.matches(observed, dl.plan.size, dl.plan.sha256) or !std.mem.eql(u8, identity.versionText(), dl.plan.version))) return error.InstallIdentityMismatch;
-        var link = try shortcut.Shortcut.init(destination.bytes());
-        try link.setTitle(if (self.title.len <= shortcut.title_max) self.title else identity.nameText());
-        const end = std.mem.lastIndexOfScalar(u8, destination.bytes(), '\\') orelse return error.InstallTarget;
-        if (end > 2) try link.setWorkdir(destination.bytes()[0..end]);
         var link_buffer: [4096]u8 = undefined;
-        const link_bytes = try link.writeTo(&link_buffer);
-        const link_hash = hash(link_bytes);
-        const package_hash = hash(dl.plan.package_id);
         var link_path_buffer: [160]u8 = undefined;
-        const link_path = try std.fmt.bufPrint(&link_path_buffer, "C:\\R4OS\\DESKTOP\\P{s}.LNK", .{package_hash[0..7]});
-        const link_target = try r.AbsoluteFilePath.parse(link_path);
-        // A pre-existing link, even with identical bytes, is not ours merely
-        // because we could have generated it. Previous bindings prove reuse.
-        switch (files.info(link_target.asZ())) {
-            .missing => {},
-            .failure => return error.InstallLinkInfo,
-            .value => {
-                const bindings = try state.load(&files, self.allocator, state.default_path);
-                defer bindings.deinit();
-                const owned = bindings.value.find(dl.plan.package_id) orelse return error.InstallForeignLink;
-                var matched = false;
-                for (owned.links) |old| if (std.mem.eql(u8, old.path, link_path) and std.mem.eql(u8, old.sha256, &link_hash)) {
-                    matched = true;
-                };
-                if (!matched) return error.InstallForeignLink;
-            },
+        var link_bytes: []const u8 = "";
+        var link_path: []const u8 = "";
+        var link_hash: [64]u8 = undefined;
+        if (dl.plan.kind == .application) {
+            var link = try shortcut.Shortcut.init(destination);
+            try link.setTitle(if (self.title.len <= shortcut.title_max) self.title else identity.nameText());
+            const end = std.mem.lastIndexOfScalar(u8, destination, '\\') orelse return error.InstallTarget;
+            if (end > 2) try link.setWorkdir(destination[0..end]);
+            link_bytes = try link.writeTo(&link_buffer);
+            link_hash = hash(link_bytes);
+            const package_hash = hash(dl.plan.package_id);
+            link_path = try std.fmt.bufPrint(&link_path_buffer, "C:\\R4OS\\DESKTOP\\P{s}.LNK", .{package_hash[0..7]});
+            const link_target = try r.AbsoluteFilePath.parse(link_path);
+            // A pre-existing link, even with identical bytes, is not ours merely
+            // because we could have generated it. Previous bindings prove reuse.
+            switch (files.info(link_target.asZ())) {
+                .missing => {},
+                .failure => return error.InstallLinkInfo,
+                .value => {
+                    const bindings = try state.load(&files, self.allocator, state.default_path);
+                    defer bindings.deinit();
+                    const owned = bindings.value.find(dl.plan.package_id) orelse return error.InstallForeignLink;
+                    var matched = false;
+                    for (owned.links) |old| if (std.mem.eql(u8, old.path, link_path) and std.mem.eql(u8, old.sha256, &link_hash)) {
+                        matched = true;
+                    };
+                    if (!matched) return error.InstallForeignLink;
+                },
+            }
         }
-        var intent = Intent{ .request = &request_hash, .catalog = dl.plan, .source = source.bytes(), .destination = destination.bytes(), .version = identity.versionText(), .size = observed.size, .sha256 = &observed.sha256, .previous = if (self.adopt) observed else null, .adopted = self.adopt, .link_path = link_path, .link_bytes = link_bytes, .link_sha256 = &link_hash };
+        var intent = Intent{ .request = &request_hash, .catalog = dl.plan, .source = source.bytes(), .destination = destination, .version = identity.versionText(), .size = observed.size, .sha256 = &observed.sha256, .previous = previous, .boot = boot, .adopted = self.adopt, .link_path = link_path, .link_bytes = link_bytes, .link_sha256 = if (dl.plan.kind == .application) &link_hash else "" };
         self.progress.set(.recording);
         try saveIntent(&files, self.allocator, intent);
         // Reparse owned slices: source.bytes()/identity above are stack loans.
@@ -211,29 +254,49 @@ pub const Job = struct {
     fn execute(self: *Job, files: *const r.Files, saved: Intent) !void {
         try saved.validate();
         var intent = saved;
-        if (!try installed(files, self.allocator, intent)) {
-            if (intent.phase != .requested) return error.InstallCommittedStateChanged;
+        var engine = backend.Engine.init(self.app);
+        const check = try installed(self.app, files, self.allocator, intent);
+        if (intent.phase == .pending_restart or (!check and intent.phase == .requested) or
+            (intent.catalog.kind != .application and intent.phase == .requested))
+        {
             if (self.stop.requested()) return error.Cancelled;
             self.progress.set(.installing);
-            var engine = backend.Engine.init(self.app);
-            var result = try engine.installAsset(intent.plan());
-            if (result.exit_code != 0 and std.mem.eql(u8, result.reasonText(), "resume-required")) result = try engine.resumeAsset(intent.plan());
+            var result = if (intent.phase == .pending_restart)
+                try engine.resumeAsset(intent.plan())
+            else if (self.reconcile_only) return else try engine.installAsset(intent.plan());
+            if (!self.reconcile_only and result.state == .rolled_back) {
+                intent.phase = .requested;
+                try saveIntent(files, self.allocator, intent);
+                result = try engine.installAsset(intent.plan());
+            }
+            if (!self.reconcile_only and result.exit_code != 0 and std.mem.eql(u8, result.reasonText(), "resume-required")) result = try engine.resumeAsset(intent.plan());
             self.receipt = result;
+            if (result.exit_code == 0 and (result.state == .staged or result.state == .pending_restart or result.state == .restart_required)) {
+                if (!self.reconcile_only) {
+                    intent.phase = .pending_restart;
+                    intent.last_backend_reason = "";
+                    try saveIntent(files, self.allocator, intent);
+                }
+                self.progress.set(.pending_restart);
+                return;
+            }
             if (result.exit_code != 0 or result.state != .installed or !result.inventory_consistent) {
+                if (self.reconcile_only) return;
                 intent.last_backend_reason = result.reasonText();
                 try saveIntent(files, self.allocator, intent);
                 if (std.mem.eql(u8, result.reasonText(), "asset-target-changed")) return error.InstallTargetChanged;
-                if (std.mem.eql(u8, result.reasonText(), "program-running")) return error.InstallProgramRunning;
                 return error.InstallBackendIncomplete;
             }
-            if (!try installed(files, self.allocator, intent)) return error.InstallReadback;
             intent.backend_generation = result.transaction_generation;
-        }
+        } else if (!check) return error.InstallCommittedStateChanged;
+        if (!try installed(self.app, files, self.allocator, intent)) return error.InstallReadback;
         intent.phase = .committed;
         intent.last_backend_reason = "";
         try saveIntent(files, self.allocator, intent);
-        self.progress.set(.linking);
-        try publishLink(files, self.allocator, intent);
+        if (intent.catalog.kind == .application) {
+            self.progress.set(.linking);
+            try publishLink(files, self.allocator, intent);
+        }
         intent.phase = .linked;
         try saveIntent(files, self.allocator, intent);
         self.progress.set(.binding);
@@ -244,21 +307,21 @@ pub const Job = struct {
         for (old.value.bindings) |value| if (!std.mem.eql(u8, value.package_id, intent.catalog.package_id)) try bindings.append(self.allocator, value);
         const exact_asset = !intent.adopted or (std.mem.eql(u8, intent.version, intent.catalog.version) and intent.size == intent.catalog.size and std.ascii.eqlIgnoreCase(intent.sha256, intent.catalog.sha256));
         const owned_links = [_]m.Link{.{ .path = intent.link_path, .sha256 = intent.link_sha256 }};
-        try bindings.append(self.allocator, .{ .package_id = intent.catalog.package_id, .package_type = .application, .target = intent.catalog.target, .installed_version = intent.version, .release_id = if (exact_asset) intent.catalog.release_id else null, .asset_id = if (exact_asset) intent.catalog.asset_id else null, .sha256 = intent.sha256, .actual_path = intent.destination, .links = &owned_links });
+        try bindings.append(self.allocator, .{ .package_id = intent.catalog.package_id, .package_type = intent.catalog.kind, .target = intent.catalog.target, .installed_version = intent.version, .release_id = if (exact_asset) intent.catalog.release_id else null, .asset_id = if (exact_asset) intent.catalog.asset_id else null, .sha256 = intent.sha256, .actual_path = intent.destination, .links = if (intent.catalog.kind == .application) &owned_links else &.{} });
         try state.save(files, self.allocator, state.default_path, .{ .bindings = bindings.items });
         intent.phase = .completed;
         try saveIntent(files, self.allocator, intent);
         self.progress.set(.installed);
     }
 };
-fn installed(files: *const r.Files, allocator: std.mem.Allocator, intent: Intent) !bool {
-    const target = try r.AbsoluteFilePath.parse(intent.destination);
-    if (files.info(target.asZ()) == .missing) return false;
-    const observed = backend.asset.inspect(files, target) catch return false;
-    if (observed.kind != .r4x or !std.ascii.eqlIgnoreCase(observed.nameText(), intent.catalog.target) or !std.mem.eql(u8, observed.versionText(), intent.version)) return false;
+fn installed(app: *r.App, files: *const r.Files, allocator: std.mem.Allocator, intent: Intent) !bool {
+    const ctx = app.system();
+    if ((try backend.asset.system.info(&ctx, intent.destination)) == null) return false;
+    const observed = backend.asset.system.inspect(&ctx, intent.destination) catch return false;
+    if (observed.kind != componentKind(intent.catalog.kind) or !std.ascii.eqlIgnoreCase(observed.nameText(), intent.catalog.target) or !std.mem.eql(u8, observed.versionText(), intent.version)) return false;
     const scratch = try allocator.alloc(u8, 64 * 1024);
     defer allocator.free(scratch);
-    if (!backend.asset.matches(try backend.asset.digest(files, target, scratch), intent.size, intent.sha256)) return false;
+    if (!backend.asset.matches(try backend.asset.system.digest(&ctx, intent.destination, scratch), intent.size, intent.sha256)) return false;
     const bytes = (try state.readBytes(files, allocator, "C:\\R4OS\\CONFIG\\MODULES.JSON", r.system_update_inventory.max_bytes)) orelse return false;
     defer allocator.free(bytes);
     const inventory = try allocator.create(r.system_update_inventory.Inventory);
@@ -266,7 +329,7 @@ fn installed(files: *const r.Files, allocator: std.mem.Allocator, intent: Intent
     if (!r.system_update_inventory.Inventory.parse(bytes, inventory)) return error.InventoryInvalid;
     var canonical: [1024]u8 = undefined;
     const path = r.r4u_manifest.canonicalInventoryTarget(&canonical, intent.destination) orelse return error.InstallTarget;
-    for (inventory.entries[0..inventory.count]) |entry| if (entry.kind == .r4x and std.ascii.eqlIgnoreCase(entry.name, intent.catalog.target) and r.r4u_manifest.targetEquals(entry.target, path) and std.mem.eql(u8, entry.version, intent.version)) return true;
+    for (inventory.entries[0..inventory.count]) |entry| if (entry.kind == componentKind(intent.catalog.kind) and std.ascii.eqlIgnoreCase(entry.name, intent.catalog.target) and r.r4u_manifest.targetEquals(entry.target, path) and std.mem.eql(u8, entry.version, intent.version)) return true;
     return false;
 }
 fn publishLink(files: *const r.Files, allocator: std.mem.Allocator, intent: Intent) !void {
@@ -305,4 +368,22 @@ fn hash(bytes: []const u8) [64]u8 {
     var value: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &value, .{});
     return std.fmt.bytesToHex(value, .lower);
+}
+
+pub fn componentKind(kind: m.Kind) r.r4u_manifest.ComponentKind {
+    return switch (kind) {
+        .application => .r4x,
+        .library => .r4l,
+        .kernel => .kernel,
+    };
+}
+/// Finish metadata only after the existing owner reports this exact batch
+/// installed. This never stages, commits, restarts or resumes a transaction.
+pub fn reconcile(app: *r.App, allocator: std.mem.Allocator) !void {
+    const files = app.files() orelse return error.FilesUnavailable;
+    const saved = (try readIntent(&files, allocator)) orelse return;
+    defer saved.deinit();
+    if (saved.value.phase != .pending_restart) return;
+    var job = Job{ .app = app, .allocator = allocator, .resuming = true, .reconcile_only = true };
+    try job.run();
 }

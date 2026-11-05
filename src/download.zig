@@ -360,6 +360,7 @@ const Store = struct {
     log: r.AbsoluteFilePath,
     stop: *r.app_contract.StopFlag,
     progress: *Progress,
+    buffered: @import("download_buffer.zig").Buffer,
 
     fn open(files: r.Files, allocator: Allocator, plan: Plan, stop: *r.app_contract.StopFlag, progress: *Progress) !Store {
         const metadata = try plan.encode(allocator);
@@ -386,11 +387,16 @@ const Store = struct {
             if (files.info(part.asZ()) != .missing) return error.UnownedPartial;
             try state.writeBytes(&files, allocator, meta.bytes(), metadata, 16384);
         }
-        var store = Store{ .files = files, .allocator = allocator, .plan = plan, .part = part, .log = log, .stop = stop, .progress = progress };
+        const memory = try allocator.alloc(u8, 64 * 1024);
+        errdefer allocator.free(memory);
+        var store = Store{ .files = files, .allocator = allocator, .plan = plan, .part = part, .log = log, .stop = stop, .progress = progress, .buffered = .{ .memory = memory, .committed = 0 } };
         if (files.info(part.asZ()) == .missing) try store.reset();
+        store.buffered.committed = try store.size();
         return store;
     }
-    fn deinit(_: *Store) void {}
+    fn deinit(self: *Store) void {
+        self.allocator.free(self.buffered.memory);
+    }
     fn size(self: *Store) !u64 {
         return switch (self.files.info(self.part.asZ())) {
             .value => |v| if (v.is_dir == 0) v.size else error.PartialIsDirectory,
@@ -403,16 +409,22 @@ const Store = struct {
             .bytes => |n| if (n != 0) return error.PartialWrite,
             else => return error.PartialWrite,
         }
+        self.buffered.reset();
     }
     fn append(self: *Store, offset: u64, bytes: []const u8) !void {
         if (self.stop.requested()) return error.Cancelled;
-        if (offset != try self.size() or offset > self.plan.size or bytes.len > self.plan.size - offset) return error.PartialOffset;
+        if (offset > self.plan.size or bytes.len > self.plan.size - offset) return error.PartialOffset;
+        try self.buffered.write(self, offset, bytes);
+        if (offset + bytes.len == self.plan.size) try self.buffered.finish(self);
+        self.progress.done.store(offset + bytes.len, .release);
+    }
+    pub fn appendBatch(self: *Store, offset: u64, bytes: []const u8) !void {
+        if (offset != try self.size()) return error.PartialOffset;
         switch (self.files.append(self.part.asZ(), bytes)) {
             .bytes => |n| if (n != bytes.len) return error.PartialWrite,
             else => return error.PartialWrite,
         }
         if (try self.size() != offset + bytes.len) return error.PartialWrite;
-        self.progress.done.store(offset + bytes.len, .release);
     }
     fn verify(self: *Store) !bool {
         if (try self.size() != self.plan.size) return false;
@@ -516,12 +528,26 @@ const Driver = struct {
             .max_retries = 0,
             .redirect_limit = 0,
             .stop = &self.session.stop.storage,
-            .timeout = r.time_contract.timeoutFinite(r.time_contract.durationFromNanoseconds(120_000_000_000)),
+            // This is the whole HTTP exchange deadline, not an idle timeout.
+            // Large original kernel assets must not be cut off after two
+            // minutes of continuous progress. Keep every attempt finite;
+            // cancellation and the existing three-retry policy still apply.
+            .timeout = r.time_contract.timeoutFinite(r.time_contract.durationFromNanoseconds(
+                @as(u64, @min(@as(u64, 3600), 120 + (plan.size - offset + 16383) / 16384)) * 1_000_000_000,
+            )),
             .head_observer = observe,
             .head_context = self,
             .target_authorizer = allow,
             .target_authorization_context = self,
         });
+        // Keep the accepted tail after transport failure or cancellation.
+        // A filesystem/offset failure is ambiguous and must not append twice.
+        if (self.invalid == null or self.invalid.? == error.Cancelled) {
+            store.buffered.finish(store) catch |err| {
+                self.invalid = err;
+            };
+        }
+        if (store.size()) |confirmed| self.progress.done.store(confirmed, .release) else |_| {}
         if (self.invalid) |err| return .{ .invalid = err };
         if (self.decision) |decision| switch (decision) {
             .restart => return .restart,

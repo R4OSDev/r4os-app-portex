@@ -12,11 +12,16 @@ R4X installation and targeted adoption use the SDK's existing journal and
 inventory transaction owner. A durable request also binds the actual path,
 version, original bytes and owned R4LNK. Interrupted work can be resumed;
 opening the store only observes the real files and known Desktop bindings.
-Update, uninstall and system activation controls follow their owner adapters.
+Libraries and kernel assets use the same owner's durable restart batch.
+The SDK derives and binds the installed BOOT plan; a second explicit action
+authorizes activation and reboot. Reopening only observes staged work.
+Uninstall and application updates follow their later owner adapters.
 Original-asset downloads run on a joined
 worker with an immutable catalog binding, durable partials, checked Range /
 If-Range continuation, a shared three-retry budget, cancellation and visible
-byte/percentage/rate/error status. Only a complete size/SHA-256 readback yields
+byte/percentage/rate/error status. Small transport fragments share a bounded
+64-KB write buffer. The finite whole-request deadline scales with asset size.
+Only a complete size/SHA-256 readback yields
 ready; that receipt does not install a package. Software access reuses R4SRV
 registration and verified HTTPS, with an ETag-bound durable catalog cache.
 The app is not shipped by normal images yet. From SSH, use

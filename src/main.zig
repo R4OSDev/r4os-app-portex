@@ -13,7 +13,7 @@ pub fn r4_app_main(app: *r.App) i32 {
     _ = window.setMinimumSize(680, 560);
     var snapshot: load.Snapshot = .{};
     defer snapshot.deinit();
-    var view = ui.Ui{ .window = &window, .allocator = app.system().allocator(), .snapshot = &snapshot, .style = r.gui.Style.light().withSystemFonts(&window.draw), .reload_requested = true, .capabilities = .{ .install = true } };
+    var view = ui.Ui{ .window = &window, .allocator = app.system().allocator(), .snapshot = &snapshot, .style = r.gui.Style.light().withSystemFonts(&window.draw), .reload_requested = true, .capabilities = .{ .install = true, .update = true } };
     defer view.deinit();
     const focus_client = r.desktop_actions.Client{ .sys = window.sys };
     switch (focus_client.focusSnapshot(.{ .window_id = @intCast(window.id) })) {
@@ -30,6 +30,7 @@ pub fn r4_app_main(app: *r.App) i32 {
     const resources = app.resources();
     var closing = false;
     var exit_code: i32 = 0;
+    var next_progress_paint: u64 = 0;
     const period = r.time_contract.timeoutFinite(r.time_contract.durationFromNanoseconds(100_000_000));
     while (true) {
         closing = closing or app.shouldClose();
@@ -44,19 +45,21 @@ pub fn r4_app_main(app: *r.App) i32 {
             }
             view.cancel_requested = false;
         }
-        if (!closing and (view.install_requested != null or view.resume_requested) and thread == null) {
+        if (!closing and (view.install_requested != null or view.resume_requested or view.restart_requested) and thread == null) {
             const request = view.install_requested;
-            const resuming = view.resume_requested;
+            const resuming = view.resume_requested or view.restart_requested;
+            const restarting = view.restart_requested;
             view.install_requested = null;
             view.resume_requested = false;
+            view.restart_requested = false;
             var created = false;
             if (resuming) {
-                install_job = .{ .app = app, .allocator = app.system().allocator(), .resuming = true };
+                install_job = .{ .app = app, .allocator = app.system().allocator(), .resuming = true, .commit_restart = restarting };
                 created = true;
             } else if (request) |value| if (snapshot.result.snapshot) |*cached| if (cached.fresh and value.package_index < cached.catalog.packages.len) {
                 const package = cached.catalog.packages[value.package_index];
                 if (download.Plan.init(package, cached.origin, cached.profile)) |plan| {
-                    install_job = .{ .app = app, .allocator = app.system().allocator(), .destination = value.destination, .title = package.display_name, .adopt = value.adopt, .download_job = .{ .app = app, .allocator = app.system().allocator(), .plan = plan, .progress = .{ .total = plan.size } } };
+                    install_job = .{ .app = app, .allocator = app.system().allocator(), .destination = value.destination, .title = package.display_name, .adopt = value.adopt, .replace = value.replace, .download_job = .{ .app = app, .allocator = app.system().allocator(), .plan = plan, .progress = .{ .total = plan.size } } };
                     created = true;
                 } else |err| snapshot.failure = err;
             };
@@ -141,7 +144,11 @@ pub fn r4_app_main(app: *r.App) i32 {
                 app.system().sleepTicks(@max(1, app.system().monotonicHz() / 10));
             },
         };
-        if (thread != null and mode != .load) view.dirty = true;
+        const now = app.system().ticks();
+        if (thread != null and mode != .load and now >= next_progress_paint) {
+            view.dirty = true;
+            next_progress_paint = now +| @max(1, app.system().monotonicHz() / 4);
+        }
         if (closing) {
             if (thread == null) break;
             continue;

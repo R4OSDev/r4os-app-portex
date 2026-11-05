@@ -13,7 +13,7 @@ const tabs = [_]g.TabItem{ .{ .text = "Entdecken" }, .{ .text = "Meine Software"
 const kinds = [_][:0]const u8{ "Apps", "Libraries", "Kernel" };
 const focus_items = [_]g.FocusItem{ .{}, .{}, .{}, .{}, .{}, .{} };
 const Action = union(enum) { tab: usize, kind: usize, search, category_toggle, category: usize, refresh, cancel, resume_install, adopt, previous, next, row: usize, detail_close, customize, path_field, path_apply, path_cancel, download, install, update, uninstall, update_all };
-pub const InstallRequest = struct { package_index: usize, destination: r.AbsoluteFilePath, adopt: bool = false };
+pub const InstallRequest = struct { package_index: usize, destination: ?r.AbsoluteFilePath, adopt: bool = false, replace: bool = false };
 const Hit = struct { action: Action, rect: g.Rect };
 const Custom = struct { id: []u8, destination: r.AbsoluteFilePath };
 
@@ -53,6 +53,7 @@ pub const Ui = struct {
     download_requested: ?usize = null,
     install_requested: ?InstallRequest = null,
     resume_requested: bool = false,
+    restart_requested: bool = false,
     installation_progress: ?*const installation.Progress = null,
     download_progress: ?*const download.Progress = null,
     focus: g.FocusState = .{ .index = 2 },
@@ -160,7 +161,8 @@ pub const Ui = struct {
         if (self.snapshot.pending_installation) return false;
         const installed = if (item) |i| i.status == .installed or i.status == .update else false;
         const newer = if (item) |i| i.status == .update else self.tab == .updates and self.visible_count > 0;
-        if (action == .install and (item == null or item.?.kind != .application or item.?.status != .available)) return false;
+        if (action == .install and (item == null or item.?.status != .available)) return false;
+        if (action == .update and item != null and item.?.kind == .application) return false;
         return self.capabilities.allows(action, p.fresh and p.inventory_known and self.snapshot.failure == null, self.busy, installed, if (item) |i| i.kind == .application else false, newer);
     }
     fn featured(self: *const Ui, p: *const v.Projection) ?usize {
@@ -194,7 +196,7 @@ pub const Ui = struct {
         if (canvas.clear(self.style.background) < 0) return false;
         if (!self.label(canvas.withTextRole(.heading), .{ .x = 24, .y = 14, .w = 230, .h = 38 }, "Portex", self.style.text, self.style.background)) return false;
         if (!self.button(canvas, if (self.busy) .cancel else .refresh, .{ .x = canvas.w - 190, .y = 18, .w = 166, .h = 34 }, if (self.busy) "Abbrechen" else "Neu laden", true, false, self.focus.index == 5)) return false;
-        if (self.snapshot.pending_installation and !self.busy and !self.button(canvas, .resume_install, .{ .x = canvas.w - 428, .y = 18, .w = 226, .h = 34 }, "Wiederaufnehmen", true, true, false)) return false;
+        if (self.snapshot.pending_installation and !self.busy and !self.button(canvas, .resume_install, .{ .x = canvas.w - 428, .y = 18, .w = 226, .h = 34 }, if (self.snapshot.pending_restart) "Neustart starten" else "Wiederaufnehmen", true, true, false)) return false;
         var scratch: [1024]u8 = undefined;
         const navigation = canvas.layoutTabs(.{ .rect = .{ .x = 22, .y = 60, .w = canvas.w - 44, .h = 34 }, .items = &tabs, .selected_index = @intFromEnum(self.tab), .focused = self.active and self.focus.index == 0 });
         if (navigation.draw(canvas, &scratch) < 0) return false;
@@ -343,7 +345,11 @@ pub const Ui = struct {
                 if (!self.busy) self.reload_requested = true;
             },
             .cancel => self.cancel_requested = true,
-            .resume_install => self.resume_requested = !self.busy,
+            .resume_install => {
+                if (!self.busy) {
+                    if (self.snapshot.pending_restart) self.restart_requested = true else self.resume_requested = true;
+                }
+            },
             .adopt => {
                 const item = self.row() orelse return;
                 if (self.busy or item.package_index == null or item.kind != .application) return;
@@ -431,16 +437,17 @@ pub const Ui = struct {
                 self.customizing = false;
             },
             // Only implemented owner adapters may enable/publish mutations.
-            .install => {
+            .install, .update => {
                 const item = self.row() orelse return;
-                if (!self.allowed(.install, item.*)) return;
-                const path = r.AbsoluteFilePath.parse(self.destination(item.*) orelse return) catch return;
-                self.install_requested = .{ .package_index = item.package_index orelse return, .destination = path };
+                const updating = std.meta.activeTag(action) == .update;
+                if (!self.allowed(if (updating) .update else .install, item.*)) return;
+                const path: ?r.AbsoluteFilePath = if (item.kind == .kernel) null else r.AbsoluteFilePath.parse(self.destination(item.*) orelse return) catch return;
+                self.install_requested = .{ .package_index = item.package_index orelse return, .destination = path, .replace = updating };
                 self.detail = false;
                 self.customizing = false;
                 self.focus.index = 5;
             },
-            .update, .uninstall, .update_all => {},
+            .uninstall, .update_all => {},
         }
         self.dirty = true;
     }

@@ -14,6 +14,7 @@ pub const Snapshot = struct {
     projection: ?view.Projection = null,
     failure: ?anyerror = null,
     pending_installation: bool = false,
+    pending_restart: bool = false,
 
     pub fn deinit(self: *Snapshot) void {
         if (self.projection) |*projection| projection.deinit();
@@ -38,10 +39,16 @@ pub const Job = struct {
             snapshot.failure = error.FilesUnavailable;
             return snapshot;
         };
+        installation.reconcile(self.app, self.allocator) catch |err| {
+            snapshot.failure = err;
+        };
         snapshot.pending_installation = installation.pending(&files, self.allocator) catch |err| blk: {
             snapshot.failure = err;
             break :blk false;
         };
+        const intent = installation.readIntent(&files, self.allocator) catch null;
+        defer if (intent) |saved| saved.deinit();
+        if (intent) |saved| snapshot.pending_restart = saved.value.phase == .pending_restart;
         const bindings = state.load(&files, self.allocator, state.default_path) catch |err| {
             snapshot.failure = err;
             return snapshot;
@@ -69,8 +76,13 @@ pub const Job = struct {
                 snapshot.failure = err;
                 return snapshot;
             };
-            verifyObserved(&files, self.allocator, &snapshot.projection.?, bindings.value) catch |err| {
+            verifyObserved(self.app, &files, self.allocator, &snapshot.projection.?, bindings.value) catch |err| {
                 snapshot.failure = err;
+            };
+            if (intent) |saved| if (saved.value.phase == .pending_restart) {
+                for (snapshot.projection.?.rows) |*row| if (std.mem.eql(u8, row.package_id, saved.value.catalog.package_id)) {
+                    row.status = .pending_restart;
+                };
             };
         } else snapshot.result.failure = .{ .reason = .cancelled };
         return snapshot;
@@ -79,21 +91,18 @@ pub const Job = struct {
 
 /// The inventory and saved bindings suggest locations; only the actual
 /// bounded R4M0 metadata (and owned hash) qualifies an installed app.
-pub fn verifyObserved(files: *const r.Files, allocator: std.mem.Allocator, projection: *view.Projection, bindings: m.Bindings) !void {
+pub fn verifyObserved(app: *r.App, files: *const r.Files, allocator: std.mem.Allocator, projection: *view.Projection, bindings: m.Bindings) !void {
+    const ctx = app.system();
     const scratch = try allocator.alloc(u8, 64 * 1024);
     defer allocator.free(scratch);
     const a = projection.arena.allocator();
     for (projection.rows) |*row| {
-        if (row.kind != .application or row.actual_path == null) continue;
-        const path = r.AbsoluteFilePath.parse(row.actual_path.?) catch {
-            row.status = .conflict;
-            continue;
-        };
-        const identity = backend.asset.inspect(files, path) catch {
+        if (row.kind == null or row.actual_path == null) continue;
+        const identity = backend.asset.system.inspect(&ctx, row.actual_path.?) catch {
             row.status = .unverified;
             continue;
         };
-        if (identity.kind != .r4x or !std.ascii.eqlIgnoreCase(identity.nameText(), row.target)) {
+        if (identity.kind != installation.componentKind(row.kind.?) or !std.ascii.eqlIgnoreCase(identity.nameText(), row.target)) {
             row.status = .conflict;
             continue;
         }
@@ -102,7 +111,7 @@ pub fn verifyObserved(files: *const r.Files, allocator: std.mem.Allocator, proje
             continue;
         }
         if (bindings.find(row.package_id)) |binding| {
-            const digest = backend.asset.digest(files, path, scratch) catch {
+            const digest = backend.asset.system.digest(&ctx, row.actual_path.?, scratch) catch {
                 row.status = .unverified;
                 continue;
             };

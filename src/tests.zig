@@ -17,6 +17,7 @@ test "original artifact adapter checks create-only plans without adding dependen
     std.testing.refAllDecls(engine.Engine);
     std.testing.refAllDecls(@import("installation.zig").Job);
     std.testing.refAllDecls(@import("load_job.zig"));
+    std.testing.refAllDecls(@import("download_buffer.zig"));
 }
 
 test "installation uses the real R4STD link writer and preserves a chosen Unicode target" {
