@@ -86,6 +86,7 @@ pub fn r4_app_main(app: *r.App) i32 {
                 downloading = false;
                 thread = null;
                 view.busy = false;
+                view.dirty = true;
             },
             .timed_out => {},
             .failure => {

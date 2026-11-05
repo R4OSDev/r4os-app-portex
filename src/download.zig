@@ -69,6 +69,7 @@ pub const Progress = struct {
     http: std.atomic.Value(u16) = .init(0),
     cause: std.atomic.Value(u16) = .init(0),
     network: std.atomic.Value(u16) = .init(0),
+    logging_failed: std.atomic.Value(bool) = .init(false),
     total: u64 = 0, // Published before createThread; never changes during work.
 
     pub fn set(self: *Progress, phase: Phase) void {
@@ -97,7 +98,7 @@ pub const Progress = struct {
         var http: [24]u8 = undefined;
         const status = self.http.load(.acquire);
         const suffix = if (status == 0) "" else std.fmt.bufPrint(&http, " | HTTP {d}", .{status}) catch "";
-        return std.fmt.bufPrint(buffer, "{s}{s}{s}{s}{s}{s}", .{ label, if (cause == 0) "" else " | ", if (cause == 0) "" else @errorName(@errorFromInt(cause)), if (network == 0) "" else ": ", if (network == 0) "" else @tagName(@as(r.app_web.Error, @enumFromInt(network - 1))), suffix }) catch label;
+        return std.fmt.bufPrint(buffer, "{s}{s}{s}{s}{s}{s}{s}", .{ label, if (cause == 0) "" else " | ", if (cause == 0) "" else @errorName(@errorFromInt(cause)), if (network == 0) "" else ": ", if (network == 0) "" else @tagName(@as(r.app_web.Error, @enumFromInt(network - 1))), suffix, if (self.logging_failed.load(.acquire)) " | Protokollfehler" else "" }) catch label;
     }
     pub fn counts(self: *const Progress, buffer: []u8) []const u8 {
         const done = @min(self.done.load(.acquire), self.total);
@@ -216,6 +217,8 @@ pub const Result = struct {
     path: ?r.AbsoluteFilePath = null,
     failure: ?anyerror = null,
     log_error: ?anyerror = null,
+    log_written: bool = false,
+    log_service_code: i32 = 0,
 };
 pub const Job = struct {
     app: *r.App,
@@ -232,12 +235,22 @@ pub const Job = struct {
             self.progress.failure(err);
             self.progress.set(if (err == error.Cancelled) .cancelled else .failed);
         };
+        if (!self.result.log_written) if (self.app.files()) |files| {
+            self.saveFailureLog(&files) catch |err| {
+                self.result.log_error = err;
+            };
+        };
         var message: [384]u8 = undefined;
         var description: [256]u8 = undefined;
         const text = std.fmt.bufPrint(&message, "asset={s} {s}", .{ self.plan.asset_id, self.progress.describe(&description) }) catch "Download result could not be formatted";
         // Includes failures before a cache/lease exists. No secrets, response
         // headers or credential-bearing URLs enter the shared log service.
-        _ = self.app.system().logServiceWrite(if (self.result.failure == null) r.abi.log_severity_info else r.abi.log_severity_warn, "Portex", text);
+        const logged = if (self.result.log_written) @as(i32, 0) else self.app.system().logServiceWrite(if (self.result.failure == null) r.abi.log_severity_info else r.abi.log_severity_warn, "Portex", text);
+        self.result.log_service_code = logged;
+        // The durable per-asset history is authoritative. The shared service
+        // is a best-effort fallback before cache creation, not a second
+        // condition for a successfully persisted diagnostic.
+        if (!self.result.log_written and logged < 0) self.progress.logging_failed.store(true, .release);
         return 0;
     }
     fn run(self: *Job) anyerror!void {
@@ -282,7 +295,19 @@ pub const Job = struct {
         self.progress.set(.ready);
     }
     fn saveLog(self: *Job, files: *const r.Files, store: *const Store) !void {
-        const log = try std.json.Stringify.valueAlloc(self.allocator, .{
+        try self.appendLog(files, store.log);
+    }
+    fn saveFailureLog(self: *Job, files: *const r.Files) !void {
+        try catalog.cacheDirectory(files);
+        const sys = self.app.system();
+        const path = "C:\\R4OS\\DATA\\PORTEX\\ERRORS.LCK";
+        if (sys.fileStreamBegin(path, r.abi.file_stream_open_create | r.r4sys.file_stream_open_lease) != 0) return error.DownloadLogBusy;
+        defer _ = sys.fileStreamAbort(path);
+        if (sys.fileStreamFinish(path, 0, r.r4sys.file_stream_finish_keep_ownership) != 0) return error.DownloadLogWrite;
+        try self.appendLog(files, try r.AbsoluteFilePath.parse("C:\\R4OS\\DATA\\PORTEX\\ERRORS.LOG"));
+    }
+    fn appendLog(self: *Job, files: *const r.Files, path: r.AbsoluteFilePath) !void {
+        const record = try std.json.Stringify.valueAlloc(self.allocator, .{
             .schema = @as(u32, 1),
             .package_id = self.plan.package_id,
             .release_id = self.plan.release_id,
@@ -294,9 +319,36 @@ pub const Job = struct {
             .retries = self.progress.retries.load(.acquire),
             .cause = if (self.progress.cause.load(.acquire) == 0) "" else @errorName(@errorFromInt(self.progress.cause.load(.acquire))),
             .transport = if (self.progress.network.load(.acquire) == 0) "" else @tagName(@as(r.app_web.Error, @enumFromInt(self.progress.network.load(.acquire) - 1))),
+            .log_error = if (self.result.log_error) |err| @errorName(err) else "",
         }, .{});
+        defer self.allocator.free(record);
+        // Append one bounded JSONL record under the cache lease. Each retrying
+        // user action retains its own outcome; no mutable status/backup pair.
+        const log = try std.fmt.allocPrint(self.allocator, "{s}\n", .{record});
         defer self.allocator.free(log);
-        try state.writeBytes(files, self.allocator, store.log.bytes(), log, 4096);
+        if (log.len > 4096) return error.DownloadLogSize;
+        const before: u64 = switch (files.info(path.asZ())) {
+            .missing => create: {
+                switch (files.write(path.asZ(), "")) {
+                    .bytes => |n| if (n != 0) return error.DownloadLogWrite,
+                    else => return error.DownloadLogWrite,
+                }
+                break :create 0;
+            },
+            .value => |info| if (info.is_dir == 0) info.size else return error.DownloadLogWrite,
+            .failure => return error.DownloadLogWrite,
+        };
+        if (before > std.math.maxInt(u32) - log.len) return error.DownloadLogSize;
+        switch (files.append(path.asZ(), log)) {
+            .bytes => |n| if (n != log.len) return error.DownloadLogWrite,
+            else => return error.DownloadLogWrite,
+        }
+        const after = switch (files.info(path.asZ())) {
+            .value => |info| info.size,
+            else => return error.DownloadLogWrite,
+        };
+        if (after != before + log.len) return error.DownloadLogWrite;
+        self.result.log_written = true;
     }
 };
 
@@ -325,7 +377,7 @@ const Store = struct {
         // Atomic stage/backup leaves retain the native short-name contract.
         const part = try r.AbsoluteFilePath.parse(try std.fmt.bufPrint(&name, "{s}\\ASSET.PRT", .{directory.bytes()}));
         const meta = try r.AbsoluteFilePath.parse(try std.fmt.bufPrint(&name, "{s}\\ASSET.JSN", .{directory.bytes()}));
-        const log = try r.AbsoluteFilePath.parse(try std.fmt.bufPrint(&name, "{s}\\STATUS.LOG", .{directory.bytes()}));
+        const log = try r.AbsoluteFilePath.parse(try std.fmt.bufPrint(&name, "{s}\\EVENTS.LOG", .{directory.bytes()}));
         const old = try state.readBytes(&files, allocator, meta.bytes(), 16384);
         defer if (old) |bytes| allocator.free(bytes);
         if (old) |bytes| {

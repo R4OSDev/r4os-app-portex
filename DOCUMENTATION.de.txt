@@ -36,8 +36,13 @@ Zwei Statuszeilen zeigen Bytes/gesamt, Prozent, KB/s oder MB/s (1024),
 Phase, Retryzaehler und konkreten Fehler/HTTP-/Transportgrund. Es gibt ein
 gemeinsames Budget von drei Wiederholungen mit 250/500/1000 ms Backoff;
 401 registriert einmal erneut. Sperren, Zertifikats- und permanente Fehler
-werden nicht blind wiederholt. STATUS.LOG speichert das Cache-Ergebnis,
-der gemeinsame Logdienst erhaelt auch Fehler vor Cacheanlage. Keine Secrets
+werden nicht blind wiederholt. EVENTS.LOG bewahrt jedes Cache-Ergebnis als
+angehaengten JSON-Eintrag; ein Protokollfehler bleibt in der GUI sichtbar.
+ERRORS.LOG im Portex-Datenordner protokolliert Fehler vor Cacheanlage unter
+einer eigenen Dateilease. Erst wenn auch dieser Dateipfad fehlschlaegt,
+dient der gemeinsame Logdienst als best-effort-Fallback. Ein erfolgreiches
+Dateiprotokoll bleibt massgeblich.
+Keine Secrets
 oder Antwortheader gelangen in diese Diagnose. ready ist keine Installation.
 
 Native Ansicht
