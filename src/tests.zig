@@ -29,7 +29,11 @@ test "update selection includes all kinds and preserves actual renamed paths; st
             .library => try std.fmt.bufPrint(&paths[i], "/R4OS/LIBS/{s}.R4L", .{p.target}),
             .kernel => "/boot/r4os.elf",
         };
-        inventory.entries[i] = .{ .name = p.target, .kind = switch (p.package_type) { .application => .r4x, .library => .r4l, .kernel => .kernel }, .version = "0.0.1", .target = target };
+        inventory.entries[i] = .{ .name = p.target, .kind = switch (p.package_type) {
+            .application => .r4x,
+            .library => .r4l,
+            .kernel => .kernel,
+        }, .version = "0.0.1", .target = target };
     }
     snapshot.projection = try view.Projection.build(allocator, catalog_value, .{}, inventory, true);
     const all = try updates.select(allocator, &snapshot, null);
@@ -55,7 +59,7 @@ test "update selection includes all kinds and preserves actual renamed paths; st
 
 test "durable update queue retains per-package success and rejects changed frozen targets or downgrades" {
     var plan = try download.Plan.init(package(), "https://138.201.253.143:4022", "public");
-    var items = [_]updates.Item{.{ .frozen = .{ .selection = .{ .plan = plan, .destination = "D:\\Manual\\CUSTOM.R4X", .title = "Original selection", .installed_version = "0.1.9" }, .previous = .{ .size = 10, .sha256 = @splat('c'), .checksum = 42 } }, .status = .installed }, undefined, undefined };
+    var items = [_]updates.Item{ .{ .frozen = .{ .selection = .{ .plan = plan, .destination = "D:\\Manual\\CUSTOM.R4X", .title = "Original selection", .installed_version = "0.1.9" }, .previous = .{ .size = 10, .sha256 = @splat('c'), .checksum = 42 } }, .status = .installed }, undefined, undefined };
     items[1] = items[0];
     items[1].frozen.selection.plan.package_id = "second";
     items[1].frozen.selection.destination = "D:\\Manual\\SECOND.R4X";
@@ -526,6 +530,7 @@ const FakeTransport = struct {
     delayed: usize = 0,
     conditional: usize = 0,
     stop: bool = false,
+    auth_failure: ?client.Failure = null,
 
     pub fn origin(_: *FakeTransport) []const u8 {
         return "https://138.201.253.143:4022";
@@ -539,7 +544,7 @@ const FakeTransport = struct {
     pub fn authenticate(self: *FakeTransport, force: bool) ?client.Failure {
         self.auth += 1;
         if (force) self.forced += 1;
-        return null;
+        return self.auth_failure;
     }
     pub fn fetch(self: *FakeTransport, etag: ?[]const u8) client.Fetch {
         if (etag != null) self.conditional += 1;
@@ -572,6 +577,41 @@ test "real schema-1 fixture retains apps, libraries, kernel and persists an orig
     try std.testing.expect(try cache.Snapshot.load(&disk, allocator, "https://172.27.254.3:4022", "lan") == null);
 }
 
+test "catalog status distinguishes missing, stale and current across setup and reload" {
+    var output: [768]u8 = undefined;
+    var transport = FakeTransport{ .statuses = &.{200}, .auth_failure = .{ .reason = .registration_credentials } };
+    var missing = try client.retrieve(&transport, allocator, null);
+    defer missing.deinit();
+    try std.testing.expectEqual(client.CatalogState.missing, missing.catalogState());
+    try std.testing.expect(std.ascii.indexOfIgnoreCase(client.describe(&missing, &output), "veraltet") == null);
+    try std.testing.expectEqual(@as(usize, 0), transport.calls);
+    // The same live consumer can reload after setup is fixed.
+    transport.auth_failure = null;
+    var empty = try client.retrieve(&transport, allocator, null);
+    defer empty.deinit();
+    try std.testing.expectEqual(client.CatalogState.current, empty.catalogState());
+    try std.testing.expectEqualStrings("Katalog aktuell: 0 Pakete", client.describe(&empty, &output));
+    transport = .{ .statuses = &.{503} };
+    var old = try cache.Snapshot.init(allocator, transport.origin(), transport.profileName(), "\"v1\"", example_catalog);
+    old.fresh = true;
+    var offline = try client.retrieve(&transport, allocator, old);
+    defer offline.deinit();
+    try std.testing.expectEqual(client.CatalogState.stale, offline.catalogState());
+    try std.testing.expect(std.mem.startsWith(u8, client.describe(&offline, &output), "Veralteter Katalog | "));
+    const retained = offline.snapshot;
+    offline.snapshot = null;
+    transport = .{ .statuses = &.{200}, .body = example_catalog };
+    var restored = try client.retrieve(&transport, allocator, retained);
+    defer restored.deinit();
+    try std.testing.expectEqual(client.CatalogState.current, restored.catalogState());
+    try std.testing.expectEqualStrings("Katalog aktuell: 3 Pakete", client.describe(&restored, &output));
+    transport = .{ .statuses = &.{200}, .body = "{}" };
+    var corrupt = try client.retrieve(&transport, allocator, null);
+    defer corrupt.deinit();
+    try std.testing.expectEqual(client.CatalogState.missing, corrupt.catalogState());
+    try std.testing.expect(std.ascii.indexOfIgnoreCase(client.describe(&corrupt, &output), "veraltet") == null);
+}
+
 test "304 requires the actual validated conditional cache and remains a successful empty catalog" {
     var transport = FakeTransport{ .statuses = &.{304} };
     var previous = try cache.Snapshot.init(allocator, transport.origin(), transport.profileName(), "\"catalog-v1\"", empty_catalog);
@@ -580,6 +620,8 @@ test "304 requires the actual validated conditional cache and remains a successf
     defer result.deinit();
     try std.testing.expect(result.failure == null and result.snapshot.?.fresh and result.snapshot.?.cached);
     try std.testing.expectEqual(@as(usize, 1), transport.conditional);
+    var description: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("Katalog aktuell: 0 Pakete (unveraendert)", client.describe(&result, &description));
     var missing = try client.retrieve(&transport, allocator, null);
     defer missing.deinit();
     try std.testing.expectEqual(client.Reason.invalid_cache, missing.failure.?.reason);

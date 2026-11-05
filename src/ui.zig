@@ -369,9 +369,7 @@ pub const Ui = struct {
         @memcpy(self.painted_counts[0..count_text.len], count_text);
         self.painted_counts_len = count_text.len;
         if (count_text.len != 0 and !self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 76, .w = canvas.w - 180, .h = 24 }, count_text, self.style.text, self.style.background)) return false;
-        var stale_text: [1024]u8 = undefined;
-        const status_text = if (self.projection() != null and !self.projection().?.fresh and !self.busy) std.fmt.bufPrint(&stale_text, "Veralteter Katalog | {s}", .{text}) catch text else text;
-        if (!self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 36, .w = canvas.w - 48, .h = 24 }, status_text, self.style.muted, self.style.background)) return false;
+        if (!self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 36, .w = canvas.w - 48, .h = 24 }, text, self.style.muted, self.style.background)) return false;
         if (self.category_open and !self.detail) if (self.projection()) |p| {
             const total = p.categories.len + 1;
             const count = @min(6, total - @min(self.category_first, total));
@@ -387,7 +385,8 @@ pub const Ui = struct {
     }
     fn paintRows(self: *Ui, canvas: g.Canvas) bool {
         self.visible_count = 0;
-        const p = self.projection() orelse return self.label(canvas, .{ .x = 24, .y = 220, .w = canvas.w - 48, .h = 32 }, if (self.busy) "Katalog und Bestand werden geladen..." else "Kein Katalog verfuegbar", self.style.muted, self.style.background);
+        const pending_text = if (self.busy) "Katalog und Bestand werden geladen..." else if (self.snapshot.result.catalogState() == .missing) "Kein Katalog verfuegbar" else "Ansicht nicht verfuegbar; bitte neu laden";
+        const p = self.projection() orelse return self.label(canvas, .{ .x = 24, .y = 220, .w = canvas.w - 48, .h = 32 }, pending_text, self.style.muted, self.style.background);
         const featured_index = self.featured(p);
         const list_y: i32 = if (featured_index != null) 350 else 210;
         if (featured_index) |i| if (!self.hero(canvas, .{ .x = 24, .y = 210, .w = canvas.w - 48, .h = 124 }, i, p.rows[i])) return false;
@@ -415,7 +414,8 @@ pub const Ui = struct {
                 .kernel => "K",
             } else "?", self.style.accent, self.style.tint)) return false;
         }
-        if (self.visible_count == 0 and featured_index == null and !self.label(canvas, .{ .x = 24, .y = 220, .w = canvas.w - 48, .h = 32 }, "Keine passenden Pakete", self.style.muted, self.style.background)) return false;
+        const empty_text = if (self.tab != .installed and self.snapshot.result.catalogState() == .missing) "Kein Katalog verfuegbar" else "Keine passenden Pakete";
+        if (self.visible_count == 0 and featured_index == null and !self.label(canvas, .{ .x = 24, .y = 220, .w = canvas.w - 48, .h = 32 }, empty_text, self.style.muted, self.style.background)) return false;
         if (self.first >= self.visible_count and self.first > 0) {
             self.first = 0;
             self.invalidate();

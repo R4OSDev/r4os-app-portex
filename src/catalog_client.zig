@@ -4,7 +4,7 @@ const r4os = @import("r4os");
 const cache = @import("catalog_cache.zig");
 const policy = @import("catalog_policy.zig");
 const Allocator = std.mem.Allocator;
-pub const Reason = enum { configuration, registration, registration_credentials, registration_unavailable, registration_response, transport, blocked, unavailable, conflict, unauthorized, invalid_cache, server_error, unexpected_status, invalid_catalog, insecure_response, cancelled, unavailable_web };
+pub const Reason = enum { configuration, registration, registration_credentials, registration_unavailable, registration_response, registration_setup, registration_storage, transport, blocked, unavailable, conflict, unauthorized, invalid_cache, server_error, unexpected_status, invalid_catalog, insecure_response, cancelled, unavailable_web };
 pub const Failure = struct {
     reason: Reason,
     http_status: u16 = 0,
@@ -12,10 +12,15 @@ pub const Failure = struct {
     transport: ?r4os.app_web.Error = null,
     cause: ?anyerror = null,
 };
+pub const CatalogState = enum { missing, stale, current };
 pub const Result = struct {
     snapshot: ?cache.Snapshot = null,
     failure: ?Failure = null,
     cache_error: ?anyerror = null,
+
+    pub fn catalogState(self: *const Result) CatalogState {
+        return if (self.snapshot) |value| (if (value.fresh) .current else .stale) else .missing;
+    }
 
     pub fn deinit(self: *Result) void {
         if (self.snapshot) |*s| s.deinit();
@@ -126,9 +131,12 @@ pub const Native = struct {
         if (response.code != @intFromEnum(r4os.server_access.Code.ok)) return .{
             .reason = switch (response.code) {
                 @intFromEnum(r4os.server_access.Code.credentials) => .registration_credentials,
+                @intFromEnum(r4os.server_access.Code.bootstrap) => .registration_setup,
+                @intFromEnum(r4os.server_access.Code.credentials_write) => .registration_storage,
                 @intFromEnum(r4os.server_access.Code.invalid_secret), @intFromEnum(r4os.server_access.Code.invalid_reply) => .registration_response,
                 else => .registration,
             },
+            .http_status = if (response.code == @intFromEnum(r4os.server_access.Code.bootstrap)) response.detail else 0,
             .detail = response.detail,
             .transport = if (response.code == @intFromEnum(r4os.server_access.Code.transport) and response.detail >= 0 and response.detail < std.meta.tags(r4os.app_web.Error).len) @enumFromInt(@as(u8, @intCast(response.detail))) else null,
         };
@@ -196,7 +204,9 @@ pub fn describe(result: *const Result, output: []u8) [:0]const u8 {
         const reason = switch (failure.reason) {
             .configuration => "Serverkonfiguration ungueltig",
             .registration => "Registrierung fehlgeschlagen",
-            .registration_credentials => "Registrierungsschluessel fehlt",
+            .registration_credentials => "Serverzugang fehlt oder ist ungueltig",
+            .registration_setup => "Automatische Servereinrichtung fehlgeschlagen",
+            .registration_storage => "Serverzugang konnte nicht gespeichert werden",
             .registration_unavailable => "R4SRV nicht erreichbar",
             .registration_response => "Registrierungsantwort ungueltig",
             .transport => "Verbindung fehlgeschlagen",
@@ -213,8 +223,9 @@ pub fn describe(result: *const Result, output: []u8) [:0]const u8 {
             .unavailable_web => "HTTPS nicht verfuegbar",
         };
         const detail = if (failure.transport) |e| @tagName(e) else if (failure.cause) |e| @errorName(e) else "";
-        if (failure.http_status == 0) return std.fmt.bufPrintZ(output, "{s}{s}{s}{s}", .{ reason, if (detail.len != 0) "; " else "", detail, if (result.snapshot != null) "; gespeicherter Katalog ist veraltet" else "" }) catch "Katalogabruf fehlgeschlagen";
-        return std.fmt.bufPrintZ(output, "{s}; HTTP {d} {s}{s}", .{ reason, failure.http_status, detail, if (result.snapshot != null) "; gespeicherter Katalog ist veraltet" else "" }) catch "Katalogabruf fehlgeschlagen";
+        const prefix = if (result.catalogState() == .stale) "Veralteter Katalog | " else "";
+        if (failure.http_status == 0) return std.fmt.bufPrintZ(output, "{s}{s}{s}{s}", .{ prefix, reason, if (detail.len != 0) "; " else "", detail }) catch "Katalogabruf fehlgeschlagen";
+        return std.fmt.bufPrintZ(output, "{s}{s}; HTTP {d} {s}", .{ prefix, reason, failure.http_status, detail }) catch "Katalogabruf fehlgeschlagen";
     }
     if (result.snapshot) |s| return std.fmt.bufPrintZ(output, "Katalog aktuell: {d} Pakete{s}{s}{s}", .{
         s.catalog.packages.len,                                if (s.cached) " (unveraendert)" else "", if (result.cache_error != null) "; Cachefehler: " else "",

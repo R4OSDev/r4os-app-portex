@@ -88,6 +88,8 @@ pub const Job = struct {
             if (!inventory_known) snapshot.failure = error.InventoryInvalid;
         } else snapshot.failure = error.InventoryMissing;
         if (!self.stop.requested()) {
+            // An empty inventory projection is useful without a catalog;
+            // availability comes exclusively from result.catalogState().
             const value = if (snapshot.result.snapshot) |s| s.catalog else m.Catalog{ .schema_version = 1, .packages = &.{}, .unavailable = &.{} };
             snapshot.projection = view.Projection.build(self.allocator, value, bindings.value, if (inventory_known) inventory else null, if (snapshot.result.snapshot) |s| s.fresh else false) catch |err| {
                 snapshot.failure = err;
