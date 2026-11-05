@@ -99,6 +99,7 @@ test "original artifact adapter checks create-only plans without adding dependen
     try std.testing.expectError(error.AssetPlan, engine.asset.validate(.{ .source = "C:\\TEMP\\ORIG.R4X", .target = "C:\\BOOT\\APP.R4X", .name = "APP", .version = "0.1.0", .size = 12, .sha256 = sha }));
     std.testing.refAllDecls(engine.Engine);
     std.testing.refAllDecls(@import("installation.zig").Job);
+    std.testing.refAllDecls(@import("uninstall.zig").Job);
     std.testing.refAllDecls(@import("load_job.zig"));
     std.testing.refAllDecls(@import("download_buffer.zig"));
 }

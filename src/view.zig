@@ -17,6 +17,7 @@ pub const Row = struct {
     actual_path: ?[]const u8 = null,
     proposed_path: ?[]const u8 = null,
     status: Status,
+    observed: bool = false,
 
     pub fn statusText(self: Row) []const u8 {
         return switch (self.status) {
@@ -95,7 +96,13 @@ pub const Projection = struct {
                 seen = true;
                 break;
             };
-            if (!seen) try rows.append(a, try copyRow(a, .{ .package_id = binding.package_id, .kind = binding.package_type, .target = binding.target, .name = binding.target, .description = "Gespeicherte Katalogbindung, aktuell kein Servereintrag", .category = "Lokal", .installed_version = binding.installed_version, .actual_path = binding.actual_path, .status = .unverified }));
+            if (!seen) {
+                var status: Status = .unverified;
+                if (inventory) |inv| for (inv.entries[0..inv.count]) |entry| {
+                    if (binding.matchesInventory(entry)) status = .local;
+                };
+                try rows.append(a, try copyRow(a, .{ .package_id = binding.package_id, .kind = binding.package_type, .target = binding.target, .name = binding.target, .description = "Gespeicherte Katalogbindung, aktuell kein Servereintrag", .category = "Lokal", .installed_version = binding.installed_version, .actual_path = binding.actual_path, .status = status }));
+            }
         }
         if (inventory) |inv| for (inv.entries[0..inv.count]) |entry| {
             const kind = inventoryKind(entry) orelse continue;

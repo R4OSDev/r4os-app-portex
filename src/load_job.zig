@@ -9,6 +9,7 @@ const backend = @import("system_update_engine");
 const shortcut = @import("r4std").shortcut;
 const installation = @import("installation.zig");
 const updates = @import("update_queue.zig");
+const uninstall = @import("uninstall.zig");
 
 pub const Snapshot = struct {
     result: catalog.Result = .{},
@@ -17,8 +18,10 @@ pub const Snapshot = struct {
     pending_installation: bool = false,
     pending_restart: bool = false,
     update_queue: ?std.json.Parsed(updates.Queue) = null,
+    removal: ?std.json.Parsed(uninstall.Intent) = null,
 
     pub fn deinit(self: *Snapshot) void {
+        if (self.removal) |value| value.deinit();
         if (self.update_queue) |value| value.deinit();
         if (self.projection) |*projection| projection.deinit();
         self.result.deinit();
@@ -49,6 +52,10 @@ pub const Job = struct {
             snapshot.failure = err;
         };
         snapshot.update_queue = updates.read(&files, self.allocator) catch |err| blk: {
+            snapshot.failure = err;
+            break :blk null;
+        };
+        snapshot.removal = uninstall.read(&files, self.allocator) catch |err| blk: {
             snapshot.failure = err;
             break :blk null;
         };
@@ -125,8 +132,12 @@ pub fn verifyObserved(app: *r.App, files: *const r.Files, allocator: std.mem.All
                 row.status = .unverified;
                 continue;
             };
-            if (!std.ascii.eqlIgnoreCase(&digest.sha256, binding.sha256)) row.status = .conflict;
+            if (!std.ascii.eqlIgnoreCase(&digest.sha256, binding.sha256)) {
+                row.status = .conflict;
+                continue;
+            }
         }
+        row.observed = true;
     }
     // One known Desktop folder, no recursive/global file-system scan. These
     // are observed locations, not an implicit write to the component inventory.

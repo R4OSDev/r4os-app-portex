@@ -194,7 +194,8 @@ pub const Job = struct {
         defer self.allocator.free(request);
         const request_hash = hash(request);
         if (saved) |value| {
-            if (std.mem.eql(u8, value.value.request, &request_hash)) return self.execute(&files, value.value);
+            if (std.mem.eql(u8, value.value.request, &request_hash) and
+                (value.value.phase != .completed or (try backend.asset.system.info(&ctx, destination)) != null)) return self.execute(&files, value.value);
             if (value.value.phase != .completed) return error.InstallationPending;
         }
         const existing = (try backend.asset.system.info(&ctx, destination)) != null;
@@ -239,37 +240,39 @@ pub const Job = struct {
             if (end > 2) try link.setWorkdir(destination[0..end]);
             link_bytes = try link.writeTo(&link_buffer);
             link_hash = hash(link_bytes);
-            const package_hash = hash(dl.plan.package_id);
-            link_path = try std.fmt.bufPrint(&link_path_buffer, "C:\\R4OS\\DESKTOP\\P{s}.LNK", .{package_hash[0..7]});
-            const link_target = try r.AbsoluteFilePath.parse(link_path);
-            // A pre-existing link, even with identical bytes, is not ours merely
-            // because we could have generated it. Previous bindings prove reuse.
-            switch (files.info(link_target.asZ())) {
-                .missing => {},
-                .failure => return error.InstallLinkInfo,
-                .value => {
-                    const bindings = try state.load(&files, self.allocator, state.default_path);
-                    defer bindings.deinit();
-                    const owned = bindings.value.find(dl.plan.package_id) orelse return error.InstallForeignLink;
-                    var matched = false;
-                    for (owned.links) |old| if (std.mem.eql(u8, old.path, link_path)) {
-                        const bytes = (try state.readBytes(&files, self.allocator, old.path, 4096)) orelse return error.InstallForeignLink;
-                        errdefer self.allocator.free(bytes);
-                        if (!std.mem.eql(u8, old.sha256, &hash(bytes)) or
-                            !r.r4u_manifest.targetEquals(owned.actual_path, destination)) return error.InstallForeignLink;
-                        var old_link: shortcut.Shortcut = .{};
-                        try old_link.loadFromBytes(bytes);
-                        if (!r.r4u_manifest.targetEquals(old_link.targetText(), destination)) return error.InstallForeignLink;
-                        // Keep the proven link and its original title when a
-                        // catalog display name changes during an update.
-                        retained_link = bytes;
-                        link_bytes = bytes;
-                        link_hash = hash(bytes);
-                        matched = true;
-                        break;
-                    };
-                    if (!matched) return error.InstallForeignLink;
-                },
+            const bindings = try state.load(&files, self.allocator, state.default_path);
+            defer bindings.deinit();
+            const owned = bindings.value.find(dl.plan.package_id);
+            if (owned != null and owned.?.links.len != 0) {
+                if (owned.?.links.len != 1 or !r.r4u_manifest.targetEquals(owned.?.actual_path, destination)) return error.InstallForeignLink;
+                const old = owned.?.links[0];
+                link_path = try std.fmt.bufPrint(&link_path_buffer, "{s}", .{old.path});
+                if (try state.readBytes(&files, self.allocator, old.path, 4096)) |bytes| {
+                    errdefer self.allocator.free(bytes);
+                    if (!std.mem.eql(u8, old.sha256, &hash(bytes))) return error.InstallForeignLink;
+                    var old_link: shortcut.Shortcut = .{};
+                    try old_link.loadFromBytes(bytes);
+                    if (!r.r4u_manifest.targetEquals(old_link.targetText(), destination)) return error.InstallForeignLink;
+                    retained_link = bytes;
+                    link_bytes = bytes;
+                    link_hash = hash(bytes);
+                }
+            } else {
+                // A changed link retained by uninstall belongs to the user.
+                // Choose a bounded unused slot for a fresh installation;
+                // never overwrite or adopt the occupied file.
+                for (0..16) |slot| {
+                    var seed: [512]u8 = undefined;
+                    const key = if (slot == 0) dl.plan.package_id else try std.fmt.bufPrint(&seed, "{s}/portex-link/{d}", .{ dl.plan.package_id, slot });
+                    const package_hash = hash(key);
+                    link_path = try std.fmt.bufPrint(&link_path_buffer, "C:\\R4OS\\DESKTOP\\P{s}.LNK", .{package_hash[0..7]});
+                    const candidate = try r.AbsoluteFilePath.parse(link_path);
+                    switch (files.info(candidate.asZ())) {
+                        .missing => break,
+                        .failure => return error.InstallLinkInfo,
+                        .value => if (slot == 15) return error.InstallLinkSlotsOccupied,
+                    }
+                }
             }
         }
         var intent = Intent{ .request = &request_hash, .catalog = dl.plan, .source = source.bytes(), .destination = destination, .version = identity.versionText(), .size = observed.size, .sha256 = &observed.sha256, .previous = previous, .boot = boot, .adopted = self.adopt, .link_path = link_path, .link_bytes = link_bytes, .link_sha256 = if (dl.plan.kind == .application) &link_hash else "" };

@@ -10,10 +10,11 @@ const catalog = @import("catalog_client.zig");
 const download = @import("download.zig");
 const installation = @import("installation.zig");
 const updates = @import("update_queue.zig");
+const uninstall = @import("uninstall.zig");
 const tabs = [_]g.TabItem{ .{ .text = "Entdecken" }, .{ .text = "Meine Software" }, .{ .text = "Updates" } };
 const kinds = [_][:0]const u8{ "Apps", "Libraries", "Kernel" };
 const focus_items = [_]g.FocusItem{ .{}, .{}, .{}, .{}, .{}, .{} };
-const Action = union(enum) { tab: usize, kind: usize, search, category_toggle, category: usize, refresh, cancel, resume_install, queue_details, adopt, previous, next, row: usize, detail_close, customize, path_field, path_apply, path_cancel, download, install, update, uninstall, update_all };
+const Action = union(enum) { tab: usize, kind: usize, search, category_toggle, category: usize, refresh, cancel, resume_install, queue_details, adopt, previous, next, row: usize, detail_close, customize, path_field, path_apply, path_cancel, download, install, update, uninstall, remove_confirm, remove_cancel, remove_abort, update_all };
 pub const InstallRequest = struct { package_index: usize, destination: ?r.AbsoluteFilePath, adopt: bool = false, replace: bool = false };
 const Hit = struct { action: Action, rect: g.Rect };
 const Custom = struct { id: []u8, destination: r.AbsoluteFilePath };
@@ -46,6 +47,11 @@ pub const Ui = struct {
     detail: bool = false,
     customizing: bool = false,
     adopting: bool = false,
+    removing: bool = false,
+    remove_requested: ?usize = null,
+    remove_resume: bool = false,
+    remove_abort: bool = false,
+    remove_progress: ?*const uninstall.Progress = null,
     dirty: bool = true,
     active: bool = false,
     busy: bool = false,
@@ -120,6 +126,9 @@ pub const Ui = struct {
     pub fn pendingUpdates(self: *const Ui) bool {
         return if (self.snapshot.update_queue) |saved| !saved.value.completed() else false;
     }
+    pub fn pendingRemoval(self: *const Ui) bool {
+        return if (self.snapshot.removal) |saved| !saved.value.terminal() else false;
+    }
     fn restartReady(self: *const Ui) bool {
         if (self.snapshot.update_queue) |saved| if (saved.value.current()) |index|
             return saved.value.items[index].status == .pending_restart;
@@ -171,8 +180,12 @@ pub const Ui = struct {
     }
     fn allowed(self: *const Ui, action: jobs.Action, item: ?v.Row) bool {
         const p = self.projection() orelse return false;
+        if (self.pendingRemoval()) return false;
         if (self.snapshot.update_queue) |saved| if (!saved.value.completed()) return false;
         if (self.snapshot.pending_installation) return false;
+        if (action == .uninstall) return self.capabilities.uninstall and !self.busy and p.inventory_known and
+            item != null and item.?.package_id.len != 0 and item.?.kind == .application and item.?.observed and item.?.actual_path != null and
+            item.?.installed_version != null and item.?.status != .conflict and item.?.status != .unverified;
         const installed = if (item) |i| i.status == .installed or i.status == .update else false;
         const newer = if (item) |i| i.status == .update else blk: {
             for (p.rows) |row_value| if (row_value.status == .update) break :blk true;
@@ -212,7 +225,7 @@ pub const Ui = struct {
         if (canvas.clear(self.style.background) < 0) return false;
         if (!self.label(canvas.withTextRole(.heading), .{ .x = 24, .y = 14, .w = 230, .h = 38 }, "Portex", self.style.text, self.style.background)) return false;
         if (!self.button(canvas, if (self.busy) .cancel else .refresh, .{ .x = canvas.w - 190, .y = 18, .w = 166, .h = 34 }, if (self.busy) "Abbrechen" else "Neu laden", true, false, self.focus.index == 5)) return false;
-        if ((self.snapshot.pending_installation or self.pendingUpdates()) and !self.busy and !self.button(canvas, .resume_install, .{ .x = canvas.w - 428, .y = 18, .w = 226, .h = 34 }, if (self.restartReady()) "Neustart starten" else "Wiederaufnehmen", true, true, false)) return false;
+        if ((self.snapshot.pending_installation or self.pendingUpdates() or self.pendingRemoval()) and !self.busy and !self.button(canvas, .resume_install, .{ .x = canvas.w - 428, .y = 18, .w = 226, .h = 34 }, if (self.restartReady()) "Neustart starten" else "Wiederaufnehmen", true, true, false)) return false;
         var scratch: [1024]u8 = undefined;
         const navigation = canvas.layoutTabs(.{ .rect = .{ .x = 22, .y = 60, .w = canvas.w - 44, .h = 34 }, .items = &tabs, .selected_index = @intFromEnum(self.tab), .focused = self.active and self.focus.index == 0 });
         if (navigation.draw(canvas, &scratch) < 0) return false;
@@ -227,8 +240,8 @@ pub const Ui = struct {
         if (!self.paintRows(canvas)) return false;
         if (!self.button(canvas, .previous, .{ .x = canvas.w - 132, .y = canvas.h - 78, .w = 48, .h = 30 }, "<", self.first > 0, false, false) or !self.button(canvas, .next, .{ .x = canvas.w - 72, .y = canvas.h - 78, .w = 48, .h = 30 }, ">", self.first + self.page_size < self.visible_count, false, false)) return false;
         var status: [768]u8 = undefined;
-        const text = if (self.update_progress) |progress| progress.describe(&status) else if (self.installation_progress) |progress| progress.describe(&status) else if (self.download_progress) |progress| progress.describe(&status) else if (self.busy) "Katalog wird geladen; die Ansicht bleibt bedienbar." else if (self.snapshot.failure) |err| std.fmt.bufPrint(&status, "Bestand konnte nicht vollstaendig gelesen werden: {s}", .{@errorName(err)}) catch "Bestand unbekannt" else catalog.describe(&self.snapshot.result, &status);
-        if (self.snapshot.update_queue != null and !self.busy and self.download_progress == null)
+        const text = if (self.remove_progress) |progress| progress.describe(&status) else if (self.pendingRemoval()) "Entfernung ausstehend: App schliessen und Wiederaufnehmen" else if (self.update_progress) |progress| progress.describe(&status) else if (self.installation_progress) |progress| progress.describe(&status) else if (self.download_progress) |progress| progress.describe(&status) else if (self.busy) "Katalog wird geladen; die Ansicht bleibt bedienbar." else if (self.snapshot.failure) |err| std.fmt.bufPrint(&status, "Bestand konnte nicht vollstaendig gelesen werden: {s}", .{@errorName(err)}) catch "Bestand unbekannt" else catalog.describe(&self.snapshot.result, &status);
+        if (self.snapshot.update_queue != null and !self.busy and self.download_progress == null and !self.pendingRemoval())
             if (!self.button(canvas, .queue_details, .{ .x = 24, .y = canvas.h - 78, .w = 200, .h = 30 }, "Updateauftrag", true, false, false)) return false;
         if (self.download_progress) |progress| {
             var counts: [256]u8 = undefined;
@@ -251,6 +264,7 @@ pub const Ui = struct {
         };
         if (self.detail and !self.paintDetail(canvas)) return false;
         if (self.showing_queue and !self.paintQueue(canvas)) return false;
+        if (self.pendingRemoval() and !self.busy and !self.detail and !self.button(canvas, .remove_abort, .{ .x = 24, .y = canvas.h - 78, .w = 288, .h = 30 }, "Entfernung abbrechen", true, false, false)) return false;
         return painting.present() >= 0;
     }
     fn paintRows(self: *Ui, canvas: g.Canvas) bool {
@@ -305,8 +319,12 @@ pub const Ui = struct {
         const count = @min(@as(usize, 4), queue.items.len - first);
         for (queue.items[first..][0..count], 0..) |item, n| {
             const phase = switch (item.status) {
-                .queued => "Wartet", .working => "In Bearbeitung", .pending_restart => "Neustart erforderlich",
-                .installed => "Installiert", .failed => "Fehlgeschlagen", .cancelled => "Abgebrochen",
+                .queued => "Wartet",
+                .working => "In Bearbeitung",
+                .pending_restart => "Neustart erforderlich",
+                .installed => "Installiert",
+                .failed => "Fehlgeschlagen",
+                .cancelled => "Abgebrochen",
             };
             const line = std.fmt.bufPrint(&text, "{d}. {s} {s}: {s}", .{ first + n + 1, item.frozen.selection.title, item.frozen.selection.plan.version, phase }) catch return false;
             const y = box.y + 42 + @as(i32, @intCast(n)) * 70;
@@ -325,6 +343,15 @@ pub const Ui = struct {
         if (dialog.drawFrame(canvas, &scratch) < 0) return false;
         self.hit_count = 0; // Covered background controls cannot fire.
         const box = dialog.contentRect();
+        if (self.removing) {
+            var text: [1024]u8 = undefined;
+            const title = std.fmt.bufPrint(&text, "{s} {s} entfernen?", .{ item.name, item.installed_version orelse "" }) catch return false;
+            if (!self.label(canvas.withTextRole(.heading), .{ .x = box.x, .y = box.y, .w = box.w, .h = 40 }, title, self.style.text, self.style.surface)) return false;
+            if (!self.label(canvas, .{ .x = box.x, .y = box.y + 64, .w = box.w, .h = 32 }, item.actual_path orelse "", self.style.text, self.style.surface)) return false;
+            if (canvas.paragraph(.{ .rect = .{ .x = box.x, .y = box.y + 112, .w = box.w, .h = 120 }, .text = "Entfernt die App-Datei und ihren Inventareintrag. Eigene unveraenderte Desktop-Links werden entfernt. Nutzerdaten, Ordner und fremde oder geaenderte Links bleiben erhalten. Eine laufende App muss zuerst geschlossen werden.", .background = self.style.surface }, &scratch) < 0) return false;
+            return self.button(canvas, .remove_cancel, .{ .x = box.x, .y = dialog.rect.bottom() - 54, .w = 180, .h = 32 }, "Abbrechen", true, false, self.focus.index == 0) and
+                self.button(canvas, .remove_confirm, .{ .x = box.right() - 200, .y = dialog.rect.bottom() - 54, .w = 200, .h = 32 }, "Jetzt entfernen", self.allowed(.uninstall, item.*), false, self.focus.index == 1);
+        }
         if (!self.label(canvas.withTextRole(.heading), .{ .x = box.x, .y = box.y, .w = box.w, .h = 34 }, item.name, self.style.text, self.style.surface)) return false;
         var versions: [512]u8 = undefined;
         const version_text = std.fmt.bufPrint(&versions, "Verfuegbar: {s}  |  Installiert: {s}", .{ item.available_version orelse "unbekannt", item.installed_version orelse "nicht bestaetigt" }) catch return false;
@@ -346,7 +373,7 @@ pub const Ui = struct {
         if (item.kind != .application and !self.label(canvas, .{ .x = box.x, .y = box.y + 236, .w = box.w, .h = 24 }, "Aktivierung ueber Systemupdate; Neustart erforderlich.", self.style.muted, self.style.surface)) return false;
         const can_download = !self.busy and item.package_index != null and self.snapshot.result.snapshot != null and self.snapshot.result.snapshot.?.fresh;
         if (!self.button(canvas, .download, .{ .x = box.x, .y = box.y + 268, .w = 210, .h = 32 }, "Herunterladen", can_download, false, self.focus.index == 4)) return false;
-        if (item.kind == .application and !self.button(canvas, .adopt, .{ .x = box.x + 226, .y = box.y + 268, .w = box.w - 226, .h = 32 }, "Vorhandene R4X zuordnen", can_download and !self.snapshot.pending_installation and item.status != .conflict, false, false)) return false;
+        if (item.kind == .application and !self.button(canvas, .adopt, .{ .x = box.x + 226, .y = box.y + 268, .w = box.w - 226, .h = 32 }, "Vorhandene R4X zuordnen", can_download and !self.snapshot.pending_installation and !self.pendingRemoval() and item.status != .conflict, false, false)) return false;
         const button_y = dialog.rect.bottom() - 54;
         if (!self.button(canvas, .detail_close, .{ .x = dialog.rect.x + 24, .y = button_y, .w = 140, .h = 32 }, "Schliessen", true, false, self.focus.index == 0)) return false;
         if (item.kind == .application and !self.button(canvas, .uninstall, .{ .x = dialog.rect.right() - 388, .y = button_y, .w = 180, .h = 32 }, "Deinstallieren", self.allowed(.uninstall, item.*), false, self.focus.index == 2)) return false;
@@ -398,7 +425,7 @@ pub const Ui = struct {
             .cancel => self.cancel_requested = true,
             .resume_install => {
                 if (!self.busy) {
-                    if (self.restartReady()) self.restart_requested = true else self.resume_requested = true;
+                    if (self.pendingRemoval()) self.remove_resume = true else if (self.restartReady()) self.restart_requested = true else self.resume_requested = true;
                 }
             },
             .queue_details => {
@@ -423,9 +450,15 @@ pub const Ui = struct {
                 self.category_open = false;
                 self.focus.index = 5;
             },
-            .previous => if (self.showing_queue) { self.queue_first -|= 4; } else { self.first -|= self.page_size; },
+            .previous => if (self.showing_queue) {
+                self.queue_first -|= 4;
+            } else {
+                self.first -|= self.page_size;
+            },
             .next => if (self.showing_queue) {
-                if (self.snapshot.update_queue) |saved| if (self.queue_first + 4 < saved.value.items.len) { self.queue_first += 4; };
+                if (self.snapshot.update_queue) |saved| if (self.queue_first + 4 < saved.value.items.len) {
+                    self.queue_first += 4;
+                };
             } else if (self.first + self.page_size < self.visible_count) {
                 self.first += self.page_size;
             },
@@ -509,7 +542,24 @@ pub const Ui = struct {
             .update_all => {
                 if (self.allowed(.update_all, null)) self.update_all_requested = true;
             },
-            .uninstall => {},
+            .uninstall => {
+                const item = self.row() orelse return;
+                if (!self.allowed(.uninstall, item.*)) return;
+                self.removing = true;
+                self.focus.index = 0;
+            },
+            .remove_cancel => self.removing = false,
+            .remove_confirm => {
+                const item = self.row() orelse return;
+                if (!self.removing or !self.allowed(.uninstall, item.*)) return;
+                self.remove_requested = self.selected;
+                self.removing = false;
+                self.detail = false;
+            },
+            .remove_abort => {
+                self.remove_resume = true;
+                self.remove_abort = true;
+            },
         }
         self.dirty = true;
     }
@@ -517,10 +567,15 @@ pub const Ui = struct {
         // The desktop admits CR and LF as Enter. Editing consumes the
         // original Unicode codepoint; command navigation uses one key value.
         const key_value = navigationKey(message);
+        if (self.removing) {
+            if (key_value == g.Key.escape) self.execute(.remove_cancel) else if (key_value == g.Key.tab or key_value == g.Key.shift_tab) {
+                self.focus.index = (self.focus.index + 1) % 2;
+                self.dirty = true;
+            } else if (key_value == g.Key.enter or key_value == ' ') self.execute(if (self.focus.index == 1) .remove_confirm else .remove_cancel);
+            return;
+        }
         if (self.showing_queue) {
-            if (key_value == g.Key.escape or key_value == g.Key.enter) self.execute(.detail_close)
-            else if (key_value == g.Key.left) self.execute(.previous)
-            else if (key_value == g.Key.right) self.execute(.next);
+            if (key_value == g.Key.escape or key_value == g.Key.enter) self.execute(.detail_close) else if (key_value == g.Key.left) self.execute(.previous) else if (key_value == g.Key.right) self.execute(.next);
             return;
         }
         if (self.customizing) {
