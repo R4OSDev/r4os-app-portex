@@ -89,7 +89,9 @@ pub fn retrieve(transport: anytype, allocator: Allocator, old: ?cache.Snapshot) 
     }
 }
 
-const Native = struct {
+/// Shared per-request server session for catalog and original-asset reads.
+/// No credential material leaves R4SRV. Buffers belong to the joined worker.
+pub const Native = struct {
     app: *r4os.App,
     stop: *r4os.app_contract.StopFlag,
     target: r4os.server_targets.Target,
@@ -128,6 +130,7 @@ const Native = struct {
                 else => .registration,
             },
             .detail = response.detail,
+            .transport = if (response.code == @intFromEnum(r4os.server_access.Code.transport) and response.detail >= 0 and response.detail < std.meta.tags(r4os.app_web.Error).len) @enumFromInt(@as(u8, @intCast(response.detail))) else null,
         };
         if (response.generation == 0 or response.port != self.target.port or response.profile != @intFromEnum(self.profile) or
             !std.mem.eql(u8, &response.target_ip, &self.target.ip.octets)) return .{ .reason = .configuration };
@@ -164,7 +167,7 @@ const Native = struct {
     }
 };
 
-fn cacheDirectory(files: *const r4os.Files) !void {
+pub fn cacheDirectory(files: *const r4os.Files) !void {
     for ([_][]const u8{ "C:\\R4OS\\DATA", "C:\\R4OS\\DATA\\PORTEX" }) |name| {
         const directory = try r4os.AbsoluteFilePath.parse(name);
         switch (files.info(directory.asZ())) {
@@ -221,20 +224,15 @@ pub fn describe(result: *const Result, output: []u8) [:0]const u8 {
 }
 
 fn refreshImpl(app: *r4os.App, allocator: Allocator, stop: *r4os.app_contract.StopFlag) !Result {
-    const sys = app.system();
     const files = app.files() orelse return error.FilesUnavailable;
-    const target = try r4os.server_targets.read(&sys, .app_center);
-    const profile = try r4os.server_profile.load(&sys);
     const raw = try allocator.alloc(u8, cache.max_catalog_bytes + r4os.http.max_header_bytes);
     defer allocator.free(raw);
     const body = try allocator.alloc(u8, cache.max_catalog_bytes);
     defer allocator.free(body);
     const scratch = try allocator.alloc(u8, r4os.app_web.tls_scratch_bytes);
     defer allocator.free(scratch);
-    var native = Native{ .app = app, .stop = stop, .target = target, .profile = profile, .raw = raw, .body = body, .scratch = scratch };
-    const origin = try std.fmt.bufPrint(&native.origin_text, "https://{s}:{d}", .{ target.host(), target.port });
-    native.origin_len = origin.len;
-    native.url_len = (try std.fmt.bufPrint(&native.url, "{s}/api/v1/packages", .{origin})).len;
+    var native = try open(app, stop, raw, body, scratch);
+    const origin = native.origin();
     var cache_error: ?anyerror = null;
     const previous = cache.Snapshot.load(&files, allocator, origin, native.profileName()) catch |err| bad_cache: {
         cache_error = err;
@@ -254,4 +252,15 @@ fn refreshImpl(app: *r4os.App, allocator: Allocator, stop: *r4os.app_contract.St
         result.cache_error = null;
     };
     return result;
+}
+
+pub fn open(app: *r4os.App, stop: *r4os.app_contract.StopFlag, raw: []u8, body: []u8, scratch: []u8) !Native {
+    const sys = app.system();
+    const target = try r4os.server_targets.read(&sys, .app_center);
+    const profile = try r4os.server_profile.load(&sys);
+    var native = Native{ .app = app, .stop = stop, .target = target, .profile = profile, .raw = raw, .body = body, .scratch = scratch };
+    const origin = try std.fmt.bufPrint(&native.origin_text, "https://{s}:{d}", .{ target.host(), target.port });
+    native.origin_len = origin.len;
+    native.url_len = (try std.fmt.bufPrint(&native.url, "{s}/api/v1/packages", .{origin})).len;
+    return native;
 }

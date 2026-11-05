@@ -1,6 +1,7 @@
 const r = @import("r4os");
 const load = @import("load_job.zig");
 const ui = @import("ui.zig");
+const download = @import("download.zig");
 
 pub fn r4_app_main(app: *r.App) i32 {
     var timers: [0]r.Timer = .{};
@@ -19,6 +20,8 @@ pub fn r4_app_main(app: *r.App) i32 {
         .failure => {},
     }
     var job = load.Job{ .app = app, .allocator = app.system().allocator() };
+    var download_job: download.Job = undefined;
+    var downloading = false;
     var thread: ?r.app_resources.JoinHandle = null;
     const resources = app.resources();
     var closing = false;
@@ -27,11 +30,38 @@ pub fn r4_app_main(app: *r.App) i32 {
     while (true) {
         closing = closing or app.shouldClose();
         if (closing or view.cancel_requested) {
-            job.stop.request();
+            if (downloading) download_job.stop.request() else job.stop.request();
             view.cancel_requested = false;
+        }
+        if (!closing and view.download_requested != null and thread == null) {
+            const index = view.download_requested.?;
+            view.download_requested = null;
+            if (snapshot.result.snapshot) |*cached| if (cached.fresh and index < cached.catalog.packages.len) {
+                const plan = download.Plan.init(cached.catalog.packages[index], cached.origin, cached.profile);
+                if (plan) |value| {
+                    // Snapshot and all plan slices remain alive through join.
+                    download_job = .{ .app = app, .allocator = app.system().allocator(), .plan = value, .progress = .{ .total = value.size } };
+                    view.download_progress = &download_job.progress;
+                    switch (resources.createThread(download.Job.entry, @intFromPtr(&download_job), 256 * 1024)) {
+                        .handle => |handle| {
+                            thread = handle;
+                            downloading = true;
+                            view.busy = true;
+                        },
+                        .failure => {
+                            download_job.progress.failure(error.WorkerUnavailable);
+                            download_job.progress.set(.failed);
+                        },
+                    }
+                } else |err| {
+                    snapshot.failure = err;
+                }
+            };
+            view.dirty = true;
         }
         if (!closing and view.reload_requested and thread == null) {
             view.reload_requested = false;
+            view.download_progress = null;
             job = .{ .app = app, .allocator = app.system().allocator() };
             switch (resources.createThread(load.Job.entry, @intFromPtr(&job), 256 * 1024)) {
                 .handle => |handle| {
@@ -47,10 +77,13 @@ pub fn r4_app_main(app: *r.App) i32 {
         }
         if (thread) |*worker| switch (worker.join(if (closing) period else r.time_contract.timeoutPoll())) {
             .exited => {
-                view.replaced();
-                snapshot.deinit();
-                snapshot = job.output;
-                job.output = .{};
+                if (!downloading) {
+                    view.replaced();
+                    snapshot.deinit();
+                    snapshot = job.output;
+                    job.output = .{};
+                }
+                downloading = false;
                 thread = null;
                 view.busy = false;
             },
@@ -61,6 +94,7 @@ pub fn r4_app_main(app: *r.App) i32 {
                 app.system().sleepTicks(@max(1, app.system().monotonicHz() / 10));
             },
         };
+        if (downloading) view.dirty = true;
         if (closing) {
             if (thread == null) break;
             continue;

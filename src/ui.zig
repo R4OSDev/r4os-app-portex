@@ -7,10 +7,11 @@ const m = @import("model.zig");
 const jobs = @import("job.zig");
 const load = @import("load_job.zig");
 const catalog = @import("catalog_client.zig");
+const download = @import("download.zig");
 const tabs = [_]g.TabItem{ .{ .text = "Entdecken" }, .{ .text = "Meine Software" }, .{ .text = "Updates" } };
 const kinds = [_][:0]const u8{ "Apps", "Libraries", "Kernel" };
 const focus_items = [_]g.FocusItem{ .{}, .{}, .{}, .{}, .{}, .{} };
-const Action = union(enum) { tab: usize, kind: usize, search, category_toggle, category: usize, refresh, cancel, previous, next, row: usize, detail_close, customize, path_field, path_apply, path_cancel, install, update, uninstall, update_all };
+const Action = union(enum) { tab: usize, kind: usize, search, category_toggle, category: usize, refresh, cancel, previous, next, row: usize, detail_close, customize, path_field, path_apply, path_cancel, download, install, update, uninstall, update_all };
 const Hit = struct { action: Action, rect: g.Rect };
 const Custom = struct { id: []u8, destination: r.AbsoluteFilePath };
 
@@ -46,6 +47,8 @@ pub const Ui = struct {
     busy: bool = false,
     reload_requested: bool = false,
     cancel_requested: bool = false,
+    download_requested: ?usize = null,
+    download_progress: ?*const download.Progress = null,
     focus: g.FocusState = .{ .index = 2 },
     hover: ?Action = null,
     pressed: ?Action = null,
@@ -197,7 +200,11 @@ pub const Ui = struct {
         if (!self.paintRows(canvas)) return false;
         if (!self.button(canvas, .previous, .{ .x = canvas.w - 132, .y = canvas.h - 78, .w = 48, .h = 30 }, "<", self.first > 0, false, false) or !self.button(canvas, .next, .{ .x = canvas.w - 72, .y = canvas.h - 78, .w = 48, .h = 30 }, ">", self.first + self.page_size < self.visible_count, false, false)) return false;
         var status: [768]u8 = undefined;
-        const text = if (self.busy) "Katalog wird geladen; die Ansicht bleibt bedienbar." else if (self.snapshot.failure) |err| std.fmt.bufPrint(&status, "Bestand konnte nicht vollstaendig gelesen werden: {s}", .{@errorName(err)}) catch "Bestand unbekannt" else catalog.describe(&self.snapshot.result, &status);
+        const text = if (self.download_progress) |progress| progress.describe(&status) else if (self.busy) "Katalog wird geladen; die Ansicht bleibt bedienbar." else if (self.snapshot.failure) |err| std.fmt.bufPrint(&status, "Bestand konnte nicht vollstaendig gelesen werden: {s}", .{@errorName(err)}) catch "Bestand unbekannt" else catalog.describe(&self.snapshot.result, &status);
+        if (self.download_progress) |progress| {
+            var counts: [256]u8 = undefined;
+            if (!self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 76, .w = canvas.w - 180, .h = 24 }, progress.counts(&counts), self.style.text, self.style.background)) return false;
+        }
         var stale_text: [1024]u8 = undefined;
         const status_text = if (self.projection() != null and !self.projection().?.fresh and !self.busy) std.fmt.bufPrint(&stale_text, "Veralteter Katalog | {s}", .{text}) catch text else text;
         if (!self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 36, .w = canvas.w - 48, .h = 24 }, status_text, self.style.muted, self.style.background)) return false;
@@ -275,6 +282,8 @@ pub const Ui = struct {
         if (!self.button(canvas, .customize, .{ .x = box.right() - 138, .y = box.y + 164, .w = 138, .h = 32 }, "Anpassen", can_customize, false, self.focus.index == 1)) return false;
         if (!self.label(canvas, .{ .x = box.x, .y = box.y + 206, .w = box.w, .h = 24 }, item.statusText(), self.style.muted, self.style.surface)) return false;
         if (item.kind != .application and !self.label(canvas, .{ .x = box.x, .y = box.y + 236, .w = box.w, .h = 24 }, "Aktivierung ueber Systemupdate; Neustart erforderlich.", self.style.muted, self.style.surface)) return false;
+        const can_download = !self.busy and item.package_index != null and self.snapshot.result.snapshot != null and self.snapshot.result.snapshot.?.fresh;
+        if (!self.button(canvas, .download, .{ .x = box.x, .y = box.y + 268, .w = 240, .h = 32 }, "Herunterladen", can_download, false, self.focus.index == 4)) return false;
         const button_y = dialog.rect.bottom() - 54;
         if (!self.button(canvas, .detail_close, .{ .x = dialog.rect.x + 24, .y = button_y, .w = 140, .h = 32 }, "Schliessen", true, false, self.focus.index == 0)) return false;
         if (item.kind == .application and !self.button(canvas, .uninstall, .{ .x = dialog.rect.right() - 388, .y = button_y, .w = 180, .h = 32 }, "Deinstallieren", self.allowed(.uninstall, item.*), false, self.focus.index == 2)) return false;
@@ -324,6 +333,15 @@ pub const Ui = struct {
                 if (!self.busy) self.reload_requested = true;
             },
             .cancel => self.cancel_requested = true,
+            .download => {
+                const item = self.row() orelse return;
+                if (self.busy or item.package_index == null or self.snapshot.result.snapshot == null or !self.snapshot.result.snapshot.?.fresh) return;
+                self.download_requested = item.package_index;
+                self.detail = false;
+                self.customizing = false;
+                self.category_open = false;
+                self.focus.index = 5;
+            },
             .previous => self.first -|= self.page_size,
             .next => if (self.first + self.page_size < self.visible_count) {
                 self.first += self.page_size;
@@ -391,8 +409,8 @@ pub const Ui = struct {
             return;
         }
         if (self.detail) {
-            if (key_value == g.Key.escape) self.execute(.detail_close) else if (key_value == g.Key.tab or key_value == g.Key.shift_tab) self.focus.index = (self.focus.index + if (key_value == g.Key.tab) @as(usize, 1) else 3) % 4 else if (key_value == g.Key.enter or key_value == ' ') {
-                if (self.focus.index == 0) self.execute(.detail_close) else if (self.focus.index == 1) self.execute(.customize);
+            if (key_value == g.Key.escape) self.execute(.detail_close) else if (key_value == g.Key.tab or key_value == g.Key.shift_tab) self.focus.index = (self.focus.index + if (key_value == g.Key.tab) @as(usize, 1) else 4) % 5 else if (key_value == g.Key.enter or key_value == ' ') {
+                if (self.focus.index == 0) self.execute(.detail_close) else if (self.focus.index == 1) self.execute(.customize) else if (self.focus.index == 4) self.execute(.download);
             }
             self.dirty = true;
             return;

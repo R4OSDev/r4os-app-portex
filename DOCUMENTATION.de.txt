@@ -15,6 +15,31 @@ Prisma-GUI ist ab0.89.49 mit SDK148 nativ umgesetzt. IMAGE_SCOPE=none verhindert
 die vorzeitige Auslieferung dieser Entwicklungsoberfläche. Slim/Full werden
 im abschließenden Integrationsschritt aktiviert.
 
+Downloads ab0.89.50
+------------------
+Herunterladen startet einen gejointen Worker. Die auftragsgebundene Teildatei
+liegt unter DATA\PORTEX\DOWNLOADS\<Plan-SHA256>\ASSET.PRT; ASSET.JSN bindet
+Ursprung, Profil, Paket, Release, Asset, Originalname, Groesse und Hash.
+Eine exklusive native Dateilease serialisiert diesen Cache auch zwischen
+Portex-Prozessen. Identische Teilstaende verwenden Range/If-Range. 206 muss
+exakt passen; 200 ersetzt den Teilstand nach einem kontrollierten Neustart,
+416 gleicht Groesse und Bestand ab. Hoechstens ein solcher Neustart je Auftrag.
+
+Antwortkopf und ETag/X-Checksum-SHA256 werden vor dem ersten Schreiben
+geprueft. Vollstaendige Dateien erhalten vor ready einen gesamten Readback
+mit Groessen- und SHA-256-Pruefung. Bekannte korrupte eigene Dateien werden
+verworfen; erneutes Laden braucht eine neue Nutzeraktion. Abgebrochene
+Teilstaende bleiben erhalten. U32-Dateioffsets begrenzen Assets derzeit
+auf maximal 4 GB minus 1 Byte; diese Grenze wird vor Dateiwirkung geprueft.
+
+Zwei Statuszeilen zeigen Bytes/gesamt, Prozent, KB/s oder MB/s (1024),
+Phase, Retryzaehler und konkreten Fehler/HTTP-/Transportgrund. Es gibt ein
+gemeinsames Budget von drei Wiederholungen mit 250/500/1000 ms Backoff;
+401 registriert einmal erneut. Sperren, Zertifikats- und permanente Fehler
+werden nicht blind wiederholt. STATUS.LOG speichert das Cache-Ergebnis,
+der gemeinsame Logdienst erhaelt auch Fehler vor Cacheanlage. Keine Secrets
+oder Antwortheader gelangen in diese Diagnose. ready ist keine Installation.
+
 Native Ansicht
 --------------
 Entdecken, Meine Software und Updates verwenden die gemeinsamen modernen

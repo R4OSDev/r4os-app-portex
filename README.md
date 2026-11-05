@@ -9,7 +9,11 @@ Catalog, bindings and installed inventory load on a joined worker. Stale,
 unavailable, unverified and local-only states stay distinct. New destinations
 preserve the original filename; existing installations retain their path.
 Mutation controls require real owner capabilities and remain disabled until
-their download/installation adapters exist. Software access reuses R4SRV
+their installation adapters exist. Original-asset downloads run on a joined
+worker with an immutable catalog binding, durable partials, checked Range /
+If-Range continuation, a shared three-retry budget, cancellation and visible
+byte/percentage/rate/error status. Only a complete size/SHA-256 readback yields
+ready; that receipt does not install a package. Software access reuses R4SRV
 registration and verified HTTPS, with an ETag-bound durable catalog cache.
 The app is not shipped by normal images yet. From SSH, use
 `DESKRUN` to start its GUI in the existing Desktop.

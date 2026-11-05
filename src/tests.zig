@@ -8,6 +8,136 @@ const client = @import("catalog_client.zig");
 const cache = @import("catalog_cache.zig");
 const policy = @import("catalog_policy.zig");
 const view = @import("view.zig");
+const download = @import("download.zig");
+
+test "download head validates immutable metadata and full or resumed lengths before writing" {
+    var p = package();
+    const plan = try download.Plan.init(p, "https://138.201.253.143:4022", "public");
+    var headers: [200]u8 = undefined;
+    const bytes = try std.fmt.bufPrint(&headers, "ETag: \"{s}\"\r\nX-Checksum-SHA256: {s}\r\n", .{ sha, sha });
+    var h = @import("r4os").app_web.DownloadHeadObservation{ .headers = bytes, .requested_offset = 0, .response = .{ .status = 200, .transfer = .content_length, .content_length = 12, .location = null, .content_type = null, .content_range = null } };
+    try std.testing.expectEqual(download.Head.accept, try download.head(plan, h));
+    h.requested_offset = 3;
+    try std.testing.expectEqual(download.Head.restart, try download.head(plan, h));
+    h.response.status = 206;
+    h.response.content_length = 9;
+    h.response.content_range = .{ .satisfied = true, .start = 3, .end = 11, .total = 12 };
+    try std.testing.expectEqual(download.Head.accept, try download.head(plan, h));
+    h.response.content_range.?.start = 4;
+    try std.testing.expectError(error.RangeMismatch, download.head(plan, h));
+    h.response.status = 416;
+    h.response.content_range = .{ .satisfied = false, .start = 0, .end = 0, .total = 12 };
+    try std.testing.expectEqual(download.Head.range_end, try download.head(plan, h));
+    h.response.content_range.?.total = 13;
+    try std.testing.expectError(error.RangeMismatch, download.head(plan, h));
+    h.response.status = 200;
+    h.requested_offset = 0;
+    h.response.content_range = null;
+    h.response.content_length = 11;
+    try std.testing.expectError(error.LengthMismatch, download.head(plan, h));
+    h.response.content_length = 12;
+    h.headers = "ETag: \"wrong\"\r\nX-Checksum-SHA256: wrong\r\n";
+    try std.testing.expectError(error.AssetMetadataChanged, download.head(plan, h));
+    h.response.status = 403;
+    try std.testing.expectError(error.ServerBlocked, download.head(plan, h));
+    var resolved: [512]u8 = undefined;
+    try std.testing.expectError(error.DownloadOriginChanged, download.resolve(plan.origin, "https://example.org/asset", &resolved));
+    try std.testing.expectError(error.DownloadOriginChanged, download.resolve(plan.origin, "http://138.201.253.143:4022/asset", &resolved));
+    const first = try plan.encode(allocator);
+    defer allocator.free(first);
+    p.release.id = "999";
+    const changed = try (try download.Plan.init(p, plan.origin, plan.profile)).encode(allocator);
+    defer allocator.free(changed);
+    try std.testing.expect(!std.mem.eql(u8, first, changed));
+}
+
+const DownloadStoreFixture = struct {
+    bytes: [12]u8 = @splat(0),
+    length: usize = 0,
+    valid: bool = true,
+    resets: usize = 0,
+    checks: usize = 0,
+    pub fn size(self: *@This()) !u64 {
+        return self.length;
+    }
+    pub fn reset(self: *@This()) !void {
+        self.length = 0;
+        self.resets += 1;
+    }
+    pub fn verify(self: *@This()) !bool {
+        self.checks += 1;
+        return self.valid and self.length == 12 and std.mem.eql(u8, &self.bytes, "Hello World!");
+    }
+};
+const DownloadDriverFixture = struct {
+    attempts: []const download.Attempt,
+    offsets: [8]u64 = @splat(0),
+    calls: usize = 0,
+    registrations: usize = 0,
+    delays: usize = 0,
+    stopped: bool = false,
+    shortened: bool = false,
+    pub fn cancelled(self: *@This()) bool {
+        return self.stopped;
+    }
+    pub fn authenticate(self: *@This(), _: bool) !void {
+        self.registrations += 1;
+    }
+    pub fn delay(self: *@This(), _: u32) void {
+        self.delays += 1;
+    }
+    pub fn request(self: *@This(), store: *DownloadStoreFixture, _: download.Plan, offset: u64) download.Attempt {
+        self.offsets[self.calls] = offset;
+        const attempt = self.attempts[self.calls];
+        self.calls += 1;
+        const amount: usize = if (attempt == .complete) (if (self.shortened) 11 else 12) else if (attempt == .failure and download.retryable(attempt.failure)) @min(12, store.length + 3) else store.length;
+        @memcpy(store.bytes[store.length..amount], "Hello World!"[store.length..amount]);
+        store.length = amount;
+        return attempt;
+    }
+};
+test "download transaction resumes, restarts, reconciles ranges and bounds failure and cancellation" {
+    const plan = try download.Plan.init(package(), "https://138.201.253.143:4022", "public");
+    var progress = download.Progress{ .total = 12 };
+    var store = DownloadStoreFixture{};
+    var driver = DownloadDriverFixture{ .attempts = &.{ .{ .failure = .read_peer_closed }, .complete } };
+    try download.receive(&driver, &store, plan, &progress);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 3 }, driver.offsets[0..2]);
+    try std.testing.expect(store.checks == 1 and driver.delays == 1);
+    for ([_]download.Attempt{ .restart, .{ .range_end = 12 } }) |first| {
+        store = .{ .length = 3 };
+        @memcpy(store.bytes[0..3], "Hel");
+        driver = .{ .attempts = &.{ first, .complete } };
+        try download.receive(&driver, &store, plan, &progress);
+        try std.testing.expectEqualSlices(u64, &.{ 3, 0 }, driver.offsets[0..2]);
+        try std.testing.expectEqual(@as(usize, 1), store.resets);
+    }
+    store = .{ .valid = false };
+    driver = .{ .attempts = &.{.complete} };
+    try std.testing.expectError(error.HashMismatch, download.receive(&driver, &store, plan, &progress));
+    store = .{};
+    driver = .{ .attempts = &.{.complete}, .shortened = true };
+    try std.testing.expectError(error.LengthMismatch, download.receive(&driver, &store, plan, &progress));
+    store = .{};
+    driver = .{ .attempts = &.{ .{ .http = 503 }, .{ .failure = .read_reset }, .{ .http = 429 }, .{ .http = 503 } } };
+    try std.testing.expectError(error.RetriesExhausted, download.receive(&driver, &store, plan, &progress));
+    try std.testing.expect(driver.calls == 4 and driver.delays == 3);
+    store = .{};
+    driver = .{ .attempts = &.{.{ .failure = .tls_certificate_root_rejected }} };
+    try std.testing.expectError(error.TransportRejected, download.receive(&driver, &store, plan, &progress));
+    try std.testing.expect(driver.calls == 1 and driver.delays == 0);
+    driver = .{ .attempts = &.{}, .stopped = true };
+    try std.testing.expectError(error.Cancelled, download.receive(&driver, &store, plan, &progress));
+    try std.testing.expectEqual(@as(usize, 0), driver.calls);
+    driver = .{ .attempts = &.{ .{ .http = 401 }, .{ .http = 401 } } };
+    try std.testing.expectError(error.HttpRejected, download.receive(&driver, &store, plan, &progress));
+    try std.testing.expectEqual(@as(usize, 1), driver.registrations);
+    progress.done.store(6, .release);
+    progress.rate.store(1536 * 1024, .release);
+    progress.retries.store(2, .release);
+    var text: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("6/12 B | 50% | 1.5 MB/s | Retry 2/3", progress.counts(&text));
+}
 
 test "GUI Unicode scalars with command-like low bytes stay text; CR and LF remain Enter" {
     const r = @import("r4os");
