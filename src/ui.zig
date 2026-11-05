@@ -52,7 +52,9 @@ pub const Ui = struct {
     remove_resume: bool = false,
     remove_abort: bool = false,
     remove_progress: ?*const uninstall.Progress = null,
-    dirty: bool = true,
+    damage: @import("damage.zig").Damage = .{},
+    painted_width: i32 = 0,
+    painted_height: i32 = 0,
     active: bool = false,
     busy: bool = false,
     reload_requested: bool = false,
@@ -76,6 +78,114 @@ pub const Ui = struct {
     hit_count: usize = 0,
     customs: std.ArrayList(Custom) = .empty,
     capabilities: jobs.Capabilities = .{},
+    type_rects: ?[3]g.Rect = null,
+    painted_status: [768]u8 = @splat(0),
+    painted_status_len: usize = 0,
+    painted_counts: [256]u8 = @splat(0),
+    painted_counts_len: usize = 0,
+
+    pub fn invalidate(self: *Ui) void {
+        self.damage.all();
+    }
+    pub fn needsPaint(self: *const Ui) bool {
+        return self.damage.active();
+    }
+    pub fn fontChanged(self: *Ui) void {
+        self.style = self.style.withSystemFonts(&self.window.draw);
+        self.type_rects = null;
+        self.invalidate();
+    }
+    fn invalidateAction(self: *Ui, action: ?Action) void {
+        if (action) |value| for (self.hits[0..self.hit_count]) |item| {
+            // Tabs and text fields only render selection/focus, not hover or
+            // pressed state. Those visible changes use the State comparison.
+            switch (value) {
+                .tab, .search, .path_field => return,
+                else => {},
+            }
+            if (std.meta.eql(item.action, value)) self.damage.add(item.rect, self.painted_width, self.painted_height);
+        };
+    }
+    pub fn pointerCancelled(self: *Ui) void {
+        const pressed = self.pressed;
+        self.release();
+        self.invalidateAction(pressed);
+    }
+    // Capture only meaningful UI state. Unused text-buffer tails, worker
+    // requests and native capture handles do not describe visible pixels.
+    const State = struct {
+        tab: v.Tab,
+        kind: m.Kind,
+        category: usize,
+        category_open: bool,
+        category_first: usize,
+        selected: ?usize,
+        first: usize,
+        detail: bool,
+        customizing: bool,
+        adopting: bool,
+        removing: bool,
+        queue: bool,
+        queue_first: usize,
+        focus: usize,
+        path_error: ?anyerror,
+        search: [256]u8,
+        search_len: usize,
+        search_cursor: usize,
+        search_anchor: ?usize,
+        path: [r.path.file_path_max + 1]u8,
+        path_len: usize,
+        path_cursor: usize,
+        path_anchor: ?usize,
+    };
+    fn state(self: *const Ui) State {
+        var result = State{
+            .tab = self.tab,
+            .kind = self.kind,
+            .category = self.category_index,
+            .category_open = self.category_open,
+            .category_first = self.category_first,
+            .selected = self.selected,
+            .first = self.first,
+            .detail = self.detail,
+            .customizing = self.customizing,
+            .adopting = self.adopting,
+            .removing = self.removing,
+            .queue = self.showing_queue,
+            .queue_first = self.queue_first,
+            .focus = self.focus.index,
+            .path_error = self.path_error,
+            .search = @splat(0),
+            .search_len = self.search.len,
+            .search_cursor = self.search.cursor,
+            .search_anchor = self.search.selection_anchor,
+            .path = @splat(0),
+            .path_len = self.path_field.len,
+            .path_cursor = self.path_field.cursor,
+            .path_anchor = self.path_field.selection_anchor,
+        };
+        @memcpy(result.search[0..self.search.len], self.search.value());
+        @memcpy(result.path[0..self.path_field.len], self.path_field.value());
+        return result;
+    }
+    fn changed(self: *Ui, previous: State) void {
+        if (!std.meta.eql(previous, self.state())) self.invalidate();
+    }
+    fn status(self: *const Ui, output: []u8) []const u8 {
+        return if (self.remove_progress) |progress| progress.describe(output) else if (self.pendingRemoval()) "Entfernung ausstehend: App schliessen und Wiederaufnehmen" else if (self.update_progress) |progress| progress.describe(output) else if (self.installation_progress) |progress| progress.describe(output) else if (self.download_progress) |progress| progress.describe(output) else if (self.busy) "Katalog wird geladen; die Ansicht bleibt bedienbar." else if (self.snapshot.failure) |err| std.fmt.bufPrint(output, "Bestand konnte nicht vollstaendig gelesen werden: {s}", .{@errorName(err)}) catch "Bestand unbekannt" else catalog.describe(&self.snapshot.result, output);
+    }
+    fn counts(self: *const Ui, output: []u8) []const u8 {
+        if (self.download_progress) |progress| return progress.counts(output);
+        if (self.update_progress) |progress| if (progress.transfer_active.load(.acquire)) return progress.counts(output);
+        return "";
+    }
+    pub fn refreshProgress(self: *Ui) void {
+        var status_bytes: [768]u8 = undefined;
+        var counts_bytes: [256]u8 = undefined;
+        if (!std.mem.eql(u8, self.status(&status_bytes), self.painted_status[0..self.painted_status_len]) or
+            !std.mem.eql(u8, self.counts(&counts_bytes), self.painted_counts[0..self.painted_counts_len]))
+            self.damage.add(.{ .x = 24, .y = self.painted_height - 80, .w = self.painted_width - 48, .h = 80 }, self.painted_width, self.painted_height);
+    }
 
     pub fn deinit(self: *Ui) void {
         self.release();
@@ -161,7 +271,8 @@ pub const Ui = struct {
         if (self.custom(item.package_id)) |path| return path.bytes();
         return item.proposed_path;
     }
-    fn typeRects(self: *const Ui, canvas: g.Canvas) [3]g.Rect {
+    fn typeRects(self: *Ui, canvas: g.Canvas) [3]g.Rect {
+        if (self.type_rects) |cached| return cached;
         var result: [3]g.Rect = undefined;
         var x: i32 = 24;
         for (kinds, 0..) |name, i| {
@@ -169,9 +280,10 @@ pub const Ui = struct {
             result[i] = .{ .x = x, .y = 112, .w = width, .h = 34 };
             x += width + 8;
         }
+        self.type_rects = result;
         return result;
     }
-    fn searchRect(self: *const Ui, canvas: g.Canvas) g.Rect {
+    fn searchRect(self: *Ui, canvas: g.Canvas) g.Rect {
         const width = @min(320, canvas.w - self.typeRects(canvas)[2].right() - 40);
         return .{ .x = canvas.w - width - 24, .y = 112, .w = width, .h = 34 };
     }
@@ -212,7 +324,12 @@ pub const Ui = struct {
         return self.button(canvas, .{ .row = index }, .{ .x = rect.right() - 154, .y = rect.y + 44, .w = 130, .h = 36 }, "Details", true, false, self.focus.index == 4 and self.selected == index);
     }
     pub fn paint(self: *Ui) bool {
-        var painting = switch (self.window.beginPaint()) {
+        const requested = self.damage;
+        self.damage.clear();
+        var painting = switch (if (!requested.full and requested.count != 0)
+            self.window.beginPaintReplace(self.painted_width, self.painted_height, requested.regions[0..requested.count])
+        else
+            self.window.beginPaint()) {
             .paint => |value| value,
             .failure => return false,
         };
@@ -221,6 +338,8 @@ pub const Ui = struct {
         var resources: [32768]u8 = undefined;
         var builder: r.app_gui.FrameCanvas = undefined;
         const canvas = painting.bufferedCanvas(&builder, &commands, &resources).withStyle(self.style);
+        self.painted_width = canvas.w;
+        self.painted_height = canvas.h;
         self.hit_count = 0;
         if (canvas.clear(self.style.background) < 0) return false;
         if (!self.label(canvas.withTextRole(.heading), .{ .x = 24, .y = 14, .w = 230, .h = 38 }, "Portex", self.style.text, self.style.background)) return false;
@@ -239,18 +358,17 @@ pub const Ui = struct {
         if (self.tab == .updates and !self.button(canvas, .update_all, .{ .x = canvas.w - 264, .y = 158, .w = 240, .h = 32 }, "Alle aktualisieren", self.allowed(.update_all, null), true, false)) return false;
         if (!self.paintRows(canvas)) return false;
         if (!self.button(canvas, .previous, .{ .x = canvas.w - 132, .y = canvas.h - 78, .w = 48, .h = 30 }, "<", self.first > 0, false, false) or !self.button(canvas, .next, .{ .x = canvas.w - 72, .y = canvas.h - 78, .w = 48, .h = 30 }, ">", self.first + self.page_size < self.visible_count, false, false)) return false;
-        var status: [768]u8 = undefined;
-        const text = if (self.remove_progress) |progress| progress.describe(&status) else if (self.pendingRemoval()) "Entfernung ausstehend: App schliessen und Wiederaufnehmen" else if (self.update_progress) |progress| progress.describe(&status) else if (self.installation_progress) |progress| progress.describe(&status) else if (self.download_progress) |progress| progress.describe(&status) else if (self.busy) "Katalog wird geladen; die Ansicht bleibt bedienbar." else if (self.snapshot.failure) |err| std.fmt.bufPrint(&status, "Bestand konnte nicht vollstaendig gelesen werden: {s}", .{@errorName(err)}) catch "Bestand unbekannt" else catalog.describe(&self.snapshot.result, &status);
+        var status_bytes: [768]u8 = undefined;
+        const text = self.status(&status_bytes);
+        @memcpy(self.painted_status[0..text.len], text);
+        self.painted_status_len = text.len;
         if (self.snapshot.update_queue != null and !self.busy and self.download_progress == null and !self.pendingRemoval())
             if (!self.button(canvas, .queue_details, .{ .x = 24, .y = canvas.h - 78, .w = 200, .h = 30 }, "Updateauftrag", true, false, false)) return false;
-        if (self.download_progress) |progress| {
-            var counts: [256]u8 = undefined;
-            if (!self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 76, .w = canvas.w - 180, .h = 24 }, progress.counts(&counts), self.style.text, self.style.background)) return false;
-        }
-        if (self.update_progress) |progress| if (progress.transfer_active.load(.acquire)) {
-            var counts: [256]u8 = undefined;
-            if (!self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 76, .w = canvas.w - 180, .h = 24 }, progress.counts(&counts), self.style.text, self.style.background)) return false;
-        };
+        var count_bytes: [256]u8 = undefined;
+        const count_text = self.counts(&count_bytes);
+        @memcpy(self.painted_counts[0..count_text.len], count_text);
+        self.painted_counts_len = count_text.len;
+        if (count_text.len != 0 and !self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 76, .w = canvas.w - 180, .h = 24 }, count_text, self.style.text, self.style.background)) return false;
         var stale_text: [1024]u8 = undefined;
         const status_text = if (self.projection() != null and !self.projection().?.fresh and !self.busy) std.fmt.bufPrint(&stale_text, "Veralteter Katalog | {s}", .{text}) catch text else text;
         if (!self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 36, .w = canvas.w - 48, .h = 24 }, status_text, self.style.muted, self.style.background)) return false;
@@ -300,7 +418,7 @@ pub const Ui = struct {
         if (self.visible_count == 0 and featured_index == null and !self.label(canvas, .{ .x = 24, .y = 220, .w = canvas.w - 48, .h = 32 }, "Keine passenden Pakete", self.style.muted, self.style.background)) return false;
         if (self.first >= self.visible_count and self.first > 0) {
             self.first = 0;
-            self.dirty = true;
+            self.invalidate();
         }
         return true;
     }
@@ -397,6 +515,8 @@ pub const Ui = struct {
         };
     }
     fn execute(self: *Ui, action: Action) void {
+        const before = self.state();
+        defer self.changed(before);
         switch (action) {
             .tab => |n| {
                 self.tab = @enumFromInt(n);
@@ -508,13 +628,13 @@ pub const Ui = struct {
                 }
                 const destination_value = v.resolveNew(p, self.path_field.value()) catch |err| {
                     self.path_error = err;
-                    self.dirty = true;
+                    self.invalidate();
                     return;
                 };
                 for (self.customs.items) |*item| if (std.mem.eql(u8, item.id, p.package_id)) {
                     item.destination = destination_value;
                     self.customizing = false;
-                    self.dirty = true;
+                    self.invalidate();
                     return;
                 };
                 const id = self.allocator.dupe(u8, p.package_id) catch {
@@ -561,16 +681,16 @@ pub const Ui = struct {
                 self.remove_abort = true;
             },
         }
-        self.dirty = true;
     }
     pub fn key(self: *Ui, message: r.app_gui.KeyMessage) void {
+        const before = self.state();
+        defer self.changed(before);
         // The desktop admits CR and LF as Enter. Editing consumes the
         // original Unicode codepoint; command navigation uses one key value.
         const key_value = navigationKey(message);
         if (self.removing) {
             if (key_value == g.Key.escape) self.execute(.remove_cancel) else if (key_value == g.Key.tab or key_value == g.Key.shift_tab) {
                 self.focus.index = (self.focus.index + 1) % 2;
-                self.dirty = true;
             } else if (key_value == g.Key.enter or key_value == ' ') self.execute(if (self.focus.index == 1) .remove_confirm else .remove_cancel);
             return;
         }
@@ -580,14 +700,12 @@ pub const Ui = struct {
         }
         if (self.customizing) {
             if (key_value == g.Key.escape) self.customizing = false else if (key_value == g.Key.enter) self.execute(.path_apply) else _ = self.path_field.handleClipboardCodepoint(&self.window.desk, if (message.codepoint == 0) key_value else message.codepoint);
-            self.dirty = true;
             return;
         }
         if (self.detail) {
             if (key_value == g.Key.escape) self.execute(.detail_close) else if (key_value == g.Key.tab or key_value == g.Key.shift_tab) self.focus.index = (self.focus.index + if (key_value == g.Key.tab) @as(usize, 1) else 4) % 5 else if (key_value == g.Key.enter or key_value == ' ') {
                 if (self.focus.index == 0) self.execute(.detail_close) else if (self.focus.index == 1) self.execute(.customize) else if (self.focus.index == 4) self.execute(.download);
             }
-            self.dirty = true;
             return;
         }
         if (key_value == g.Key.tab or key_value == g.Key.shift_tab) {
@@ -595,7 +713,7 @@ pub const Ui = struct {
             _ = self.focus.handleKey(&focus_items, key_value);
             if (self.focus.index == 4 and self.selected == null) self.selectNext(true);
         } else switch (self.focus.index) {
-            0 => {
+            0 => if (key_value == g.Key.left or key_value == g.Key.right or key_value == g.Key.up or key_value == g.Key.down or key_value == g.Key.home or key_value == g.Key.end) {
                 const step = self.layoutCanvas().layoutTabs(.{ .rect = .{}, .items = &tabs, .selected_index = @intFromEnum(self.tab) }).keyAction(key_value);
                 self.tab = @enumFromInt(step.index);
                 self.first = 0;
@@ -621,7 +739,6 @@ pub const Ui = struct {
             5 => if (key_value == g.Key.enter or key_value == ' ') self.execute(if (self.busy) .cancel else .refresh),
             else => {},
         }
-        self.dirty = true;
     }
     fn selectNext(self: *Ui, forward: bool) void {
         const p = self.projection() orelse return;
@@ -655,8 +772,25 @@ pub const Ui = struct {
     }
     pub fn mouse(self: *Ui, message: r.app_gui.MouseMessage) void {
         const action = self.at(message.x, message.y);
+        if (message.action == .move) {
+            if (std.meta.eql(self.hover, action)) return;
+            const previous = self.hover;
+            self.hover = action;
+            self.invalidateAction(previous);
+            self.invalidateAction(action);
+            return;
+        }
+        const before = self.state();
+        const old_pressed = self.pressed;
+        defer {
+            self.changed(before);
+            if (!std.meta.eql(old_pressed, self.pressed)) {
+                self.invalidateAction(old_pressed);
+                self.invalidateAction(self.pressed);
+            }
+        }
         switch (message.action) {
-            .move => self.hover = action,
+            .move => unreachable,
             .down => {
                 if ((message.buttons & 1) == 0) return;
                 if (self.category_open) {
@@ -666,12 +800,14 @@ pub const Ui = struct {
                 if (action) |value| {
                     if (std.meta.activeTag(value) == .search) {
                         self.focus.index = 2;
-                        self.search.cursor = self.layoutCanvas().textIndexAt(self.search.value(), message.x - self.searchRect(self.layoutCanvas()).x - g.default_metrics.text_pad_x);
+                        const canvas = self.layoutCanvas();
+                        self.search.cursor = canvas.textIndexAt(self.search.value(), message.x - self.searchRect(canvas).x - g.default_metrics.text_pad_x);
                         self.search.clearSelection();
                     }
                     if (std.meta.activeTag(value) == .path_field) {
-                        const box = self.modal(self.layoutCanvas()).contentRect();
-                        self.path_field.cursor = self.layoutCanvas().textIndexAt(self.path_field.value(), message.x - box.x - g.default_metrics.text_pad_x);
+                        const canvas = self.layoutCanvas();
+                        const box = self.modal(canvas).contentRect();
+                        self.path_field.cursor = canvas.textIndexAt(self.path_field.value(), message.x - box.x - g.default_metrics.text_pad_x);
                         self.path_field.clearSelection();
                     }
                     if (self.acquire()) {
@@ -688,7 +824,6 @@ pub const Ui = struct {
                 if (event == .submitted) if (pending) |value| self.execute(value);
             },
         }
-        self.dirty = true;
     }
     pub fn replaced(self: *Ui, next: *const load.Snapshot) void {
         const old_category = self.category();
@@ -708,9 +843,12 @@ pub const Ui = struct {
         self.showing_queue = false;
         self.category_first = 0;
         self.category_open = false;
-        self.dirty = true;
+        self.invalidate();
     }
     pub fn wheel(self: *Ui, delta: i32) void {
+        if (delta == 0) return;
+        const before = self.state();
+        defer self.changed(before);
         if (self.showing_queue) {
             self.execute(if (delta < 0) .next else .previous);
             return;
@@ -722,6 +860,97 @@ pub const Ui = struct {
         } else if (delta < 0) {
             if (self.first + self.page_size < self.visible_count) self.first += self.page_size;
         } else self.first -|= self.page_size;
-        self.dirty = true;
     }
 };
+
+test "pointer no-ops do not paint; hover damage and cancel preserve exact control bounds" {
+    var window: r.Window = undefined;
+    var snapshot: load.Snapshot = .{};
+    var ui = Ui{ .window = &window, .allocator = std.testing.allocator, .snapshot = &snapshot, .style = g.Style.light(), .painted_width = 680, .painted_height = 560 };
+    ui.hit_count = 3;
+    ui.hits[0] = .{ .action = .refresh, .rect = .{ .x = 490, .y = 18, .w = 166, .h = 34 } };
+    ui.hits[1] = .{ .action = .next, .rect = .{ .x = 608, .y = 482, .w = 48, .h = 30 } };
+    ui.hits[2] = .{ .action = .search, .rect = .{ .x = 340, .y = 112, .w = 300, .h = 34 } };
+    ui.damage.clear();
+    var mouse = r.app_gui.MouseMessage{ .window_id = 1, .action = .move, .x = 340, .y = 269, .buttons = 0, .modifiers = 0, .tick = 0 };
+    for (0..100) |_| ui.mouse(mouse);
+    try std.testing.expect(!ui.needsPaint());
+    mouse.y = 128;
+    ui.mouse(mouse);
+    try std.testing.expect(!ui.needsPaint());
+    mouse.y = 269;
+    ui.mouse(mouse);
+    try std.testing.expect(!ui.needsPaint());
+    mouse.x = 510;
+    mouse.y = 30;
+    ui.mouse(mouse);
+    try std.testing.expect(!ui.damage.full and ui.damage.count == 1);
+    try std.testing.expectEqual(r.abi.DisplayDamageRect{ .x = 490, .y = 18, .w = 166, .h = 34 }, ui.damage.regions[0]);
+    ui.damage.clear();
+    for (0..100) |_| ui.mouse(mouse);
+    try std.testing.expect(!ui.needsPaint());
+    mouse.x = 620;
+    mouse.y = 490;
+    ui.mouse(mouse);
+    try std.testing.expect(!ui.damage.full and ui.damage.count == 2);
+    ui.damage.clear();
+    ui.pressed = .refresh;
+    ui.capture.begin(0, .submitted);
+    ui.pointerCancelled();
+    try std.testing.expect(ui.pressed == null and ui.capture.target == null);
+    try std.testing.expect(!ui.damage.full and ui.damage.count == 1);
+    ui.damage.clear();
+    ui.focus.index = 5;
+    ui.key(.{ .window_id = 1, .key = 'z', .codepoint = 'z', .modifiers = 0, .tick = 0 });
+    ui.wheel(0);
+    ui.wheel(1);
+    ui.wheel(-1);
+    try std.testing.expect(!ui.needsPaint());
+    ui.key(.{ .window_id = 1, .key = g.Key.enter, .codepoint = g.Key.enter, .modifiers = 0, .tick = 0 });
+    try std.testing.expect(ui.reload_requested);
+}
+
+test "client damage clips and remerges bridging unions before regional replacement" {
+    var damage: @import("damage.zig").Damage = .{};
+    damage.clear();
+    damage.add(.{ .x = -10, .y = -10, .w = 30, .h = 30 }, 100, 100);
+    damage.add(.{ .x = 40, .y = 0, .w = 20, .h = 20 }, 100, 100);
+    damage.add(.{ .x = 20, .y = 0, .w = 20, .h = 20 }, 100, 100);
+    try std.testing.expectEqual(@as(usize, 1), damage.count);
+    try std.testing.expectEqual(r.abi.DisplayDamageRect{ .x = 0, .y = 0, .w = 60, .h = 20 }, damage.regions[0]);
+    damage.add(.{ .x = 200, .y = 0, .w = 10, .h = 10 }, 100, 100);
+    try std.testing.expectEqual(@as(usize, 1), damage.count);
+    damage.all();
+    damage.add(.{ .w = 10, .h = 10 }, 100, 100);
+    try std.testing.expect(damage.full and damage.count == 0);
+}
+
+test "worker progress repaints only changed visible footer text" {
+    var window: r.Window = undefined;
+    var snapshot: load.Snapshot = .{};
+    var progress: download.Progress = .{ .total = 1024 };
+    var ui = Ui{ .window = &window, .allocator = std.testing.allocator, .snapshot = &snapshot, .style = g.Style.light(), .painted_width = 680, .painted_height = 560, .download_progress = &progress };
+    const status = ui.status(&ui.painted_status);
+    ui.painted_status_len = status.len;
+    const counts = ui.counts(&ui.painted_counts);
+    ui.painted_counts_len = counts.len;
+    ui.damage.clear();
+    for (0..100) |_| ui.refreshProgress();
+    try std.testing.expect(!ui.needsPaint());
+    progress.done.store(512, .release);
+    ui.refreshProgress();
+    try std.testing.expect(!ui.damage.full and ui.damage.count == 1);
+    try std.testing.expectEqual(r.abi.DisplayDamageRect{ .x = 24, .y = 480, .w = 632, .h = 80 }, ui.damage.regions[0]);
+    ui.painted_counts_len = ui.counts(&ui.painted_counts).len;
+    ui.damage.clear();
+    ui.refreshProgress();
+    try std.testing.expect(!ui.needsPaint());
+    progress.set(.verifying);
+    ui.refreshProgress();
+    try std.testing.expect(ui.needsPaint() and !ui.damage.full);
+    ui.damage.clear();
+    ui.painted_status_len = ui.status(&ui.painted_status).len;
+    // Repeats that leave displayed text unchanged remain invisible.
+    ui.refreshProgress();
+    try std.testing.expect(!ui.needsPaint());
+}

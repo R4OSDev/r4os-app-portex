@@ -84,7 +84,7 @@ pub fn r4_app_main(app: *r.App) i32 {
                 },
                 .failure => snapshot.failure = error.WorkerUnavailable,
             }
-            view.dirty = true;
+            view.invalidate();
         }
         const queued_resume = view.pendingUpdates() and (view.resume_requested or view.restart_requested);
         const queued_new = view.update_all_requested or (view.install_requested != null and view.install_requested.?.replace);
@@ -124,7 +124,7 @@ pub fn r4_app_main(app: *r.App) i32 {
                     },
                 }
             }
-            view.dirty = true;
+            view.invalidate();
         }
         if (!closing and (view.install_requested != null or view.resume_requested or view.restart_requested) and thread == null) {
             const request = view.install_requested;
@@ -161,7 +161,7 @@ pub fn r4_app_main(app: *r.App) i32 {
                     },
                 }
             }
-            view.dirty = true;
+            view.invalidate();
         }
         if (!closing and view.download_requested != null and thread == null) {
             const index = view.download_requested.?;
@@ -190,7 +190,7 @@ pub fn r4_app_main(app: *r.App) i32 {
                     snapshot.failure = err;
                 }
             };
-            view.dirty = true;
+            view.invalidate();
         }
         if (!closing and view.reload_requested and thread == null) {
             view.reload_requested = false;
@@ -207,7 +207,7 @@ pub fn r4_app_main(app: *r.App) i32 {
                     view.busy = false;
                 },
             }
-            view.dirty = true;
+            view.invalidate();
         }
         if (thread) |*worker| switch (worker.join(if (closing) period else r.time_contract.timeoutPoll())) {
             .exited => {
@@ -225,7 +225,7 @@ pub fn r4_app_main(app: *r.App) i32 {
                 }
                 thread = null;
                 view.busy = false;
-                view.dirty = true;
+                view.invalidate();
             },
             .timed_out => {},
             .failure => {
@@ -236,15 +236,14 @@ pub fn r4_app_main(app: *r.App) i32 {
         };
         const now = app.system().ticks();
         if (thread != null and mode != .load and now >= next_progress_paint) {
-            view.dirty = true;
+            view.refreshProgress();
             next_progress_paint = now +| @max(1, app.system().monotonicHz() / 4);
         }
         if (closing) {
             if (thread == null) break;
             continue;
         }
-        if (view.dirty) {
-            view.dirty = false;
+        if (view.needsPaint()) {
             if (!view.paint()) {
                 closing = true;
                 exit_code = -3;
@@ -252,37 +251,16 @@ pub fn r4_app_main(app: *r.App) i32 {
             }
         }
         switch (window.waitMessage(period)) {
-            .message => |message| switch (message) {
-                .close => closing = true,
-                .resize => {
-                    view.release();
-                    view.dirty = true;
-                },
-                .font_changed => {
-                    view.style = view.style.withSystemFonts(&window.draw);
-                    view.dirty = true;
-                },
-                .key => |key| view.key(key),
-                .mouse => |mouse| view.mouse(mouse),
-                .wheel => |wheel| view.wheel(wheel.delta),
-                .focus_gained => {
-                    view.active = true;
-                    view.dirty = true;
-                },
-                .focus_lost => {
-                    view.active = false;
-                    view.release();
-                    view.dirty = true;
-                },
-                .input_reset => {
-                    view.release();
-                    view.dirty = true;
-                },
-                .pointer_capture => |capture| {
-                    if (capture.state == r.abi.gui_pointer_state_cancelled) view.release();
-                    view.dirty = true;
-                },
-                else => {},
+            .message => |message| {
+                closing = dispatch(&view, message);
+                // Bounded dispatch keeps input order and gives jobs/Close and
+                // paint another turn even under continuous pointer activity.
+                // Rebuild changed layouts before hit-testing another event.
+                var remaining: usize = 31;
+                while (!closing and !view.damage.full and remaining != 0) : (remaining -= 1) {
+                    const pending = window.pollMessage() orelse break;
+                    closing = dispatch(&view, pending);
+                }
             },
             .failure => |code| {
                 closing = true;
@@ -292,4 +270,38 @@ pub fn r4_app_main(app: *r.App) i32 {
         }
     }
     return exit_code;
+}
+
+fn dispatch(view: *ui.Ui, message: r.app_gui.Message) bool {
+    switch (message) {
+        .close => return true,
+        .resize => {
+            view.release();
+            view.invalidate();
+        },
+        .font_changed => {
+            view.fontChanged();
+        },
+        .key => |key| view.key(key),
+        .mouse => |mouse| view.mouse(mouse),
+        .wheel => |wheel| view.wheel(wheel.delta),
+        .focus_gained => {
+            view.active = true;
+            view.invalidate();
+        },
+        .focus_lost => {
+            view.active = false;
+            view.release();
+            view.invalidate();
+        },
+        .input_reset => {
+            view.release();
+            view.invalidate();
+        },
+        .pointer_capture => |capture| {
+            if (capture.state == r.abi.gui_pointer_state_cancelled) view.pointerCancelled();
+        },
+        else => {},
+    }
+    return false;
 }
