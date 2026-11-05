@@ -62,6 +62,8 @@ pub fn resolve(origin: []const u8, url: []const u8, output: []u8) ![]const u8 {
 }
 
 pub const Progress = struct {
+    observer: ?*const fn (?*anyopaque, *const Progress) void = null,
+    observer_context: ?*anyopaque = null,
     phase: std.atomic.Value(u8) = .init(@intFromEnum(Phase.idle)),
     done: std.atomic.Value(u64) = .init(0),
     rate: std.atomic.Value(u64) = .init(0),
@@ -74,6 +76,7 @@ pub const Progress = struct {
 
     pub fn set(self: *Progress, phase: Phase) void {
         self.phase.store(@intFromEnum(phase), .release);
+        if (self.observer) |callback| callback(self.observer_context, self);
     }
     pub fn current(self: *const Progress) Phase {
         return @enumFromInt(self.phase.load(.acquire));
@@ -225,6 +228,7 @@ pub const Job = struct {
     allocator: Allocator,
     plan: Plan,
     stop: r.app_contract.StopFlag = .{},
+    external_stop: ?*r.app_contract.StopFlag = null,
     progress: Progress = .{},
     result: Result = .{},
 
@@ -266,7 +270,8 @@ pub const Job = struct {
         if (sys.fileStreamBegin(lock_path, r.abi.file_stream_open_create | r.r4sys.file_stream_open_lease) != 0) return error.DownloadBusy;
         defer _ = sys.fileStreamAbort(lock_path);
         if (sys.fileStreamFinish(lock_path, 0, r.r4sys.file_stream_finish_keep_ownership) != 0) return error.DownloadLock;
-        var store = try Store.open(files, self.allocator, self.plan, &self.stop, &self.progress);
+        const stop = self.external_stop orelse &self.stop;
+        var store = try Store.open(files, self.allocator, self.plan, stop, &self.progress);
         defer store.deinit();
         defer self.saveLog(&files, &store) catch |err| {
             self.result.log_error = err;
@@ -284,7 +289,7 @@ pub const Job = struct {
         defer self.allocator.free(raw);
         const io = try self.allocator.alloc(u8, 64 * 1024);
         defer self.allocator.free(io);
-        var session = try catalog.open(self.app, &self.stop, raw, &.{}, scratch);
+        var session = try catalog.open(self.app, stop, raw, &.{}, scratch);
         if (!std.mem.eql(u8, session.origin(), self.plan.origin) or !std.mem.eql(u8, session.profileName(), self.plan.profile)) return error.ServerTargetChanged;
         var driver = Driver{ .session = &session, .io = io, .progress = &self.progress };
         try driver.authenticate(false);

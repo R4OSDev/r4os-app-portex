@@ -111,6 +111,34 @@ bestehende Installation. Vorhandene Pfade gewinnen auch vor Anpassen.
 
 UI-Aufträge und Produktgrenzen
 -----------------------------
+Ab0.89.53 sucht Portex beim Oeffnen und danach alle fuenf Minuten nach
+neueren Versionen. Diese Suche laeuft nur bei offenem Fenster und wartet
+bei laufenden Auftraegen oder offenen Dialogen. Typ, Suche und eine weiter
+vorhandene Kategorie bleiben nach Katalogwechsel erhalten. Ein neuer
+Assetname oder ein geaenderter Anzeigename allein ist kein Versionsupdate.
+
+Aktualisieren und Alle aktualisieren sichern zuerst die vollstaendige
+Originalauswahl in UPDATES.JSON: Paket/Release/Asset, tatsaechliches Ziel,
+alte technische Version, Dateihash und gegebenenfalls BOOT-Bindung.
+Alle betrifft die drei Pakettypen unabhaengig vom sichtbaren Filter.
+QUEUE.LCK serialisiert Portex-Auftraege; die gemeinsamen Installations-
+und SYSLOCK-Besitzer bleiben fuer jede einzelne Aktivierung zustaendig.
+
+Updateauftrag zeigt den Zustand jedes Pakets. Erledigte Pakete werden bei
+Wiederholung uebersprungen; Fehler halten den verbleibenden Auftrag an.
+HTTP- und Transportgruende bleiben im Paketstatus erhalten. Ein Neustart-
+artefakt pausiert die weiteren Pakete. Neustart starten aktiviert nur
+diesen eigenen Auftrag; nach Boot kann Wiederaufnehmen den Rest fortsetzen.
+Die Transaktion bleibt je Asset; mehrere Neustarts koennen erforderlich sein.
+Fensteroeffnung beobachtet Abschluesse und Rollbacks, ohne neue Nutzdateien
+zu laden, vorzubereiten oder einen manuellen SYSUPD-Batch zu aktivieren.
+
+Alte Dateien werden vor dem Download und unter SYSLOCK erneut gebunden.
+Laufende Apps und Portex selbst verwenden den Neustartpfad. Bewiesene
+eigene Links behalten ihre Originalbytes auch bei einem neuen Servernamen;
+veraenderte oder fremde Links werden zurueckgewiesen. Der bisherige
+Installationspfad hat bei jedem Update Vorrang vor einem neuen Vorschlag.
+
 Ab0.89.52 werden R4L und Kernel-ELF ueber den gemeinsamen R4U-Adapter
 vorbereitet. Die Library verwendet ihr konkretes Systemziel ohne App-Link.
 Der SDK-Bootbesitzer liest fuer Kernel den vorhandenen Installationsplan

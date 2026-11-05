@@ -9,10 +9,11 @@ const load = @import("load_job.zig");
 const catalog = @import("catalog_client.zig");
 const download = @import("download.zig");
 const installation = @import("installation.zig");
+const updates = @import("update_queue.zig");
 const tabs = [_]g.TabItem{ .{ .text = "Entdecken" }, .{ .text = "Meine Software" }, .{ .text = "Updates" } };
 const kinds = [_][:0]const u8{ "Apps", "Libraries", "Kernel" };
 const focus_items = [_]g.FocusItem{ .{}, .{}, .{}, .{}, .{}, .{} };
-const Action = union(enum) { tab: usize, kind: usize, search, category_toggle, category: usize, refresh, cancel, resume_install, adopt, previous, next, row: usize, detail_close, customize, path_field, path_apply, path_cancel, download, install, update, uninstall, update_all };
+const Action = union(enum) { tab: usize, kind: usize, search, category_toggle, category: usize, refresh, cancel, resume_install, queue_details, adopt, previous, next, row: usize, detail_close, customize, path_field, path_apply, path_cancel, download, install, update, uninstall, update_all };
 pub const InstallRequest = struct { package_index: usize, destination: ?r.AbsoluteFilePath, adopt: bool = false, replace: bool = false };
 const Hit = struct { action: Action, rect: g.Rect };
 const Custom = struct { id: []u8, destination: r.AbsoluteFilePath };
@@ -52,6 +53,10 @@ pub const Ui = struct {
     cancel_requested: bool = false,
     download_requested: ?usize = null,
     install_requested: ?InstallRequest = null,
+    update_all_requested: bool = false,
+    update_progress: ?*const updates.Progress = null,
+    showing_queue: bool = false,
+    queue_first: usize = 0,
     resume_requested: bool = false,
     restart_requested: bool = false,
     installation_progress: ?*const installation.Progress = null,
@@ -112,6 +117,14 @@ pub const Ui = struct {
         if (self.snapshot.projection) |*p| return p;
         return null;
     }
+    pub fn pendingUpdates(self: *const Ui) bool {
+        return if (self.snapshot.update_queue) |saved| !saved.value.completed() else false;
+    }
+    fn restartReady(self: *const Ui) bool {
+        if (self.snapshot.update_queue) |saved| if (saved.value.current()) |index|
+            return saved.value.items[index].status == .pending_restart;
+        return self.snapshot.pending_restart;
+    }
     fn row(self: *const Ui) ?*const v.Row {
         const p = self.projection() orelse return null;
         const i = self.selected orelse return null;
@@ -158,11 +171,14 @@ pub const Ui = struct {
     }
     fn allowed(self: *const Ui, action: jobs.Action, item: ?v.Row) bool {
         const p = self.projection() orelse return false;
+        if (self.snapshot.update_queue) |saved| if (!saved.value.completed()) return false;
         if (self.snapshot.pending_installation) return false;
         const installed = if (item) |i| i.status == .installed or i.status == .update else false;
-        const newer = if (item) |i| i.status == .update else self.tab == .updates and self.visible_count > 0;
+        const newer = if (item) |i| i.status == .update else blk: {
+            for (p.rows) |row_value| if (row_value.status == .update) break :blk true;
+            break :blk false;
+        };
         if (action == .install and (item == null or item.?.status != .available)) return false;
-        if (action == .update and item != null and item.?.kind == .application) return false;
         return self.capabilities.allows(action, p.fresh and p.inventory_known and self.snapshot.failure == null, self.busy, installed, if (item) |i| i.kind == .application else false, newer);
     }
     fn featured(self: *const Ui, p: *const v.Projection) ?usize {
@@ -196,7 +212,7 @@ pub const Ui = struct {
         if (canvas.clear(self.style.background) < 0) return false;
         if (!self.label(canvas.withTextRole(.heading), .{ .x = 24, .y = 14, .w = 230, .h = 38 }, "Portex", self.style.text, self.style.background)) return false;
         if (!self.button(canvas, if (self.busy) .cancel else .refresh, .{ .x = canvas.w - 190, .y = 18, .w = 166, .h = 34 }, if (self.busy) "Abbrechen" else "Neu laden", true, false, self.focus.index == 5)) return false;
-        if (self.snapshot.pending_installation and !self.busy and !self.button(canvas, .resume_install, .{ .x = canvas.w - 428, .y = 18, .w = 226, .h = 34 }, if (self.snapshot.pending_restart) "Neustart starten" else "Wiederaufnehmen", true, true, false)) return false;
+        if ((self.snapshot.pending_installation or self.pendingUpdates()) and !self.busy and !self.button(canvas, .resume_install, .{ .x = canvas.w - 428, .y = 18, .w = 226, .h = 34 }, if (self.restartReady()) "Neustart starten" else "Wiederaufnehmen", true, true, false)) return false;
         var scratch: [1024]u8 = undefined;
         const navigation = canvas.layoutTabs(.{ .rect = .{ .x = 22, .y = 60, .w = canvas.w - 44, .h = 34 }, .items = &tabs, .selected_index = @intFromEnum(self.tab), .focused = self.active and self.focus.index == 0 });
         if (navigation.draw(canvas, &scratch) < 0) return false;
@@ -207,15 +223,21 @@ pub const Ui = struct {
         if (self.search.draw(canvas, self.searchRect(canvas), &scratch) < 0 or !self.hit(.search, self.searchRect(canvas), true)) return false;
         if (self.search.value().len == 0 and !self.search.focused and !self.label(canvas, self.searchRect(canvas).inset(8, 4), "Suchen...", self.style.muted, self.style.surface)) return false;
         if (!self.button(canvas, .category_toggle, .{ .x = 24, .y = 158, .w = 260, .h = 32 }, self.category() orelse "Alle Kategorien", self.projection() != null, false, self.focus.index == 3)) return false;
-        if (self.tab == .updates and !self.button(canvas, .update_all, .{ .x = canvas.w - 224, .y = 158, .w = 200, .h = 32 }, "Alle aktualisieren", self.allowed(.update_all, null), true, false)) return false;
+        if (self.tab == .updates and !self.button(canvas, .update_all, .{ .x = canvas.w - 264, .y = 158, .w = 240, .h = 32 }, "Alle aktualisieren", self.allowed(.update_all, null), true, false)) return false;
         if (!self.paintRows(canvas)) return false;
         if (!self.button(canvas, .previous, .{ .x = canvas.w - 132, .y = canvas.h - 78, .w = 48, .h = 30 }, "<", self.first > 0, false, false) or !self.button(canvas, .next, .{ .x = canvas.w - 72, .y = canvas.h - 78, .w = 48, .h = 30 }, ">", self.first + self.page_size < self.visible_count, false, false)) return false;
         var status: [768]u8 = undefined;
-        const text = if (self.installation_progress) |progress| progress.describe(&status) else if (self.download_progress) |progress| progress.describe(&status) else if (self.busy) "Katalog wird geladen; die Ansicht bleibt bedienbar." else if (self.snapshot.failure) |err| std.fmt.bufPrint(&status, "Bestand konnte nicht vollstaendig gelesen werden: {s}", .{@errorName(err)}) catch "Bestand unbekannt" else catalog.describe(&self.snapshot.result, &status);
+        const text = if (self.update_progress) |progress| progress.describe(&status) else if (self.installation_progress) |progress| progress.describe(&status) else if (self.download_progress) |progress| progress.describe(&status) else if (self.busy) "Katalog wird geladen; die Ansicht bleibt bedienbar." else if (self.snapshot.failure) |err| std.fmt.bufPrint(&status, "Bestand konnte nicht vollstaendig gelesen werden: {s}", .{@errorName(err)}) catch "Bestand unbekannt" else catalog.describe(&self.snapshot.result, &status);
+        if (self.snapshot.update_queue != null and !self.busy and self.download_progress == null)
+            if (!self.button(canvas, .queue_details, .{ .x = 24, .y = canvas.h - 78, .w = 200, .h = 30 }, "Updateauftrag", true, false, false)) return false;
         if (self.download_progress) |progress| {
             var counts: [256]u8 = undefined;
             if (!self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 76, .w = canvas.w - 180, .h = 24 }, progress.counts(&counts), self.style.text, self.style.background)) return false;
         }
+        if (self.update_progress) |progress| if (progress.transfer_active.load(.acquire)) {
+            var counts: [256]u8 = undefined;
+            if (!self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 76, .w = canvas.w - 180, .h = 24 }, progress.counts(&counts), self.style.text, self.style.background)) return false;
+        };
         var stale_text: [1024]u8 = undefined;
         const status_text = if (self.projection() != null and !self.projection().?.fresh and !self.busy) std.fmt.bufPrint(&stale_text, "Veralteter Katalog | {s}", .{text}) catch text else text;
         if (!self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 36, .w = canvas.w - 48, .h = 24 }, status_text, self.style.muted, self.style.background)) return false;
@@ -228,6 +250,7 @@ pub const Ui = struct {
             }
         };
         if (self.detail and !self.paintDetail(canvas)) return false;
+        if (self.showing_queue and !self.paintQueue(canvas)) return false;
         return painting.present() >= 0;
     }
     fn paintRows(self: *Ui, canvas: g.Canvas) bool {
@@ -266,6 +289,34 @@ pub const Ui = struct {
             self.dirty = true;
         }
         return true;
+    }
+    fn paintQueue(self: *Ui, canvas: g.Canvas) bool {
+        const saved = self.snapshot.update_queue orelse return false;
+        const queue = saved.value;
+        const dialog = g.ModalDialog.centered(canvas.bounds(), @min(720, canvas.w - 32), @min(456, canvas.h - 32), "Updateauftrag");
+        var scratch: [2048]u8 = undefined;
+        if (dialog.drawFrame(canvas, &scratch) < 0) return false;
+        self.hit_count = 0;
+        const box = dialog.contentRect();
+        var text: [1024]u8 = undefined;
+        const heading = std.fmt.bufPrint(&text, "{d}/{d} installiert | {d} ausstehend", .{ queue.installedCount(), queue.items.len, queue.items.len - queue.installedCount() }) catch return false;
+        if (!self.label(canvas, .{ .x = box.x, .y = box.y, .w = box.w, .h = 26 }, heading, self.style.text, self.style.surface)) return false;
+        const first = @min(self.queue_first, queue.items.len);
+        const count = @min(@as(usize, 4), queue.items.len - first);
+        for (queue.items[first..][0..count], 0..) |item, n| {
+            const phase = switch (item.status) {
+                .queued => "Wartet", .working => "In Bearbeitung", .pending_restart => "Neustart erforderlich",
+                .installed => "Installiert", .failed => "Fehlgeschlagen", .cancelled => "Abgebrochen",
+            };
+            const line = std.fmt.bufPrint(&text, "{d}. {s} {s}: {s}", .{ first + n + 1, item.frozen.selection.title, item.frozen.selection.plan.version, phase }) catch return false;
+            const y = box.y + 42 + @as(i32, @intCast(n)) * 70;
+            if (!self.label(canvas, .{ .x = box.x, .y = y, .w = box.w, .h = 28 }, line, self.style.text, self.style.surface)) return false;
+            if (!self.label(canvas.withTextRole(.caption), .{ .x = box.x, .y = y + 30, .w = box.w, .h = 26 }, item.failure orelse item.frozen.selection.destination, self.style.muted, self.style.surface)) return false;
+        }
+        const bottom = dialog.rect.bottom() - 50;
+        return self.button(canvas, .previous, .{ .x = box.x, .y = bottom, .w = 64, .h = 32 }, "<", first > 0, false, false) and
+            self.button(canvas, .next, .{ .x = box.x + 72, .y = bottom, .w = 64, .h = 32 }, ">", first + count < queue.items.len, false, false) and
+            self.button(canvas, .detail_close, .{ .x = dialog.rect.right() - 164, .y = bottom, .w = 140, .h = 32 }, "Schliessen", true, true, false);
     }
     fn paintDetail(self: *Ui, canvas: g.Canvas) bool {
         const item = self.row() orelse return false;
@@ -347,8 +398,13 @@ pub const Ui = struct {
             .cancel => self.cancel_requested = true,
             .resume_install => {
                 if (!self.busy) {
-                    if (self.snapshot.pending_restart) self.restart_requested = true else self.resume_requested = true;
+                    if (self.restartReady()) self.restart_requested = true else self.resume_requested = true;
                 }
+            },
+            .queue_details => {
+                self.showing_queue = true;
+                self.queue_first = 0;
+                self.detail = false;
             },
             .adopt => {
                 const item = self.row() orelse return;
@@ -367,8 +423,10 @@ pub const Ui = struct {
                 self.category_open = false;
                 self.focus.index = 5;
             },
-            .previous => self.first -|= self.page_size,
-            .next => if (self.first + self.page_size < self.visible_count) {
+            .previous => if (self.showing_queue) { self.queue_first -|= 4; } else { self.first -|= self.page_size; },
+            .next => if (self.showing_queue) {
+                if (self.snapshot.update_queue) |saved| if (self.queue_first + 4 < saved.value.items.len) { self.queue_first += 4; };
+            } else if (self.first + self.page_size < self.visible_count) {
                 self.first += self.page_size;
             },
             .row => |i| {
@@ -380,6 +438,7 @@ pub const Ui = struct {
             },
             .detail_close => {
                 self.detail = false;
+                self.showing_queue = false;
                 self.customizing = false;
                 self.focus.index = 4;
             },
@@ -447,7 +506,10 @@ pub const Ui = struct {
                 self.customizing = false;
                 self.focus.index = 5;
             },
-            .uninstall, .update_all => {},
+            .update_all => {
+                if (self.allowed(.update_all, null)) self.update_all_requested = true;
+            },
+            .uninstall => {},
         }
         self.dirty = true;
     }
@@ -455,6 +517,12 @@ pub const Ui = struct {
         // The desktop admits CR and LF as Enter. Editing consumes the
         // original Unicode codepoint; command navigation uses one key value.
         const key_value = navigationKey(message);
+        if (self.showing_queue) {
+            if (key_value == g.Key.escape or key_value == g.Key.enter) self.execute(.detail_close)
+            else if (key_value == g.Key.left) self.execute(.previous)
+            else if (key_value == g.Key.right) self.execute(.next);
+            return;
+        }
         if (self.customizing) {
             if (key_value == g.Key.escape) self.customizing = false else if (key_value == g.Key.enter) self.execute(.path_apply) else _ = self.path_field.handleClipboardCodepoint(&self.window.desk, if (message.codepoint == 0) key_value else message.codepoint);
             self.dirty = true;
@@ -567,18 +635,31 @@ pub const Ui = struct {
         }
         self.dirty = true;
     }
-    pub fn replaced(self: *Ui) void {
+    pub fn replaced(self: *Ui, next: *const load.Snapshot) void {
+        const old_category = self.category();
+        var next_category: usize = 0;
+        if (old_category) |name| if (next.projection) |projection_value| {
+            for (projection_value.categories, 0..) |category_name, i| if (std.mem.eql(u8, name, category_name)) {
+                next_category = i + 1;
+                break;
+            };
+        };
         self.release();
         self.detail = false;
         self.customizing = false;
         self.selected = null;
         self.first = 0;
-        self.category_index = 0;
+        self.category_index = next_category;
+        self.showing_queue = false;
         self.category_first = 0;
         self.category_open = false;
         self.dirty = true;
     }
     pub fn wheel(self: *Ui, delta: i32) void {
+        if (self.showing_queue) {
+            self.execute(if (delta < 0) .next else .previous);
+            return;
+        }
         if (self.detail) return;
         if (self.category_open) {
             const p = self.projection() orelse return;

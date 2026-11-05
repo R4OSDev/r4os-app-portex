@@ -19,6 +19,9 @@ pub const Progress = struct {
     fn set(self: *Progress, value: Phase) void {
         self.phase.store(@intFromEnum(value), .release);
     }
+    pub fn current(self: *const Progress) Phase {
+        return @enumFromInt(self.phase.load(.acquire));
+    }
     pub fn describe(self: *const Progress, buffer: []u8) []const u8 {
         const phase: Phase = @enumFromInt(self.phase.load(.acquire));
         const label = switch (phase) {
@@ -103,6 +106,10 @@ pub const Job = struct {
     allocator: std.mem.Allocator,
     download_job: ?download.Job = null,
     stop: r.app_contract.StopFlag = .{},
+    external_stop: ?*r.app_contract.StopFlag = null,
+    expected_previous: ?backend.asset.Digest = null,
+    expected_version: ?[]const u8 = null,
+    expected_boot: ?backend.asset.system.BootProof = null,
     destination: ?r.AbsoluteFilePath = null,
     title: []const u8 = "",
     adopt: bool = false,
@@ -113,6 +120,10 @@ pub const Job = struct {
     progress: Progress = .{},
     failure: ?anyerror = null,
     receipt: ?backend.Result = null,
+
+    fn cancelled(self: *Job) bool {
+        return if (self.external_stop) |flag| flag.requested() else self.stop.requested();
+    }
 
     pub fn entry(raw: u64) callconv(.c) i32 {
         const self: *Job = @ptrFromInt(raw);
@@ -177,6 +188,7 @@ pub const Job = struct {
         }
         const dl = if (self.download_job) |*value| value else return error.InstallDownloadMissing;
         const boot = if (dl.plan.kind == .kernel) try backend.asset.system.bootPlan(&ctx) else null;
+        if (self.expected_boot) |proof| if (boot == null or !proof.eql(boot.?)) return error.UpdateBootChanged;
         const destination = if (dl.plan.kind == .kernel) backend.asset.system.kernel_target else if (self.destination) |*path| path.bytes() else return error.InstallTarget;
         const request = try std.json.Stringify.valueAlloc(self.allocator, .{ dl.plan, destination, self.adopt, self.replace, boot }, .{});
         defer self.allocator.free(request);
@@ -193,17 +205,20 @@ pub const Job = struct {
         if (existing) {
             const old_identity = try backend.asset.system.inspect(&ctx, destination);
             if (old_identity.kind != componentKind(dl.plan.kind) or !std.ascii.eqlIgnoreCase(old_identity.nameText(), dl.plan.target)) return error.InstallIdentityMismatch;
+            if (self.expected_version) |version| if (!std.mem.eql(u8, old_identity.versionText(), version)) return error.UpdateTargetChanged;
+            if (self.replace and (r.r4u_manifest.compareVersions(dl.plan.version, old_identity.versionText()) orelse return error.UpdateVersion) <= 0) return error.UpdateNotNewer;
             const scratch = try self.allocator.alloc(u8, 64 * 1024);
             defer self.allocator.free(scratch);
             previous = try backend.asset.system.digest(&ctx, destination, scratch);
         }
+        if (self.expected_previous) |expected| if (previous == null or !std.meta.eql(expected, previous.?)) return error.UpdateTargetChanged;
         var source: r.AbsoluteFilePath = undefined;
         if (self.adopt) source = try r.AbsoluteFilePath.parse(destination) else {
             _ = download.Job.entry(@intFromPtr(dl));
             if (dl.result.failure) |err| return err;
             source = dl.result.path orelse return error.InstallDownloadMissing;
         }
-        if (self.stop.requested() or dl.stop.requested()) return error.Cancelled;
+        if (self.cancelled() or dl.stop.requested()) return error.Cancelled;
         const scratch = try self.allocator.alloc(u8, 64 * 1024);
         defer self.allocator.free(scratch);
         const observed = try backend.asset.digest(&files, source, scratch);
@@ -215,6 +230,8 @@ pub const Job = struct {
         var link_bytes: []const u8 = "";
         var link_path: []const u8 = "";
         var link_hash: [64]u8 = undefined;
+        var retained_link: ?[]u8 = null;
+        defer if (retained_link) |bytes| self.allocator.free(bytes);
         if (dl.plan.kind == .application) {
             var link = try shortcut.Shortcut.init(destination);
             try link.setTitle(if (self.title.len <= shortcut.title_max) self.title else identity.nameText());
@@ -235,8 +252,21 @@ pub const Job = struct {
                     defer bindings.deinit();
                     const owned = bindings.value.find(dl.plan.package_id) orelse return error.InstallForeignLink;
                     var matched = false;
-                    for (owned.links) |old| if (std.mem.eql(u8, old.path, link_path) and std.mem.eql(u8, old.sha256, &link_hash)) {
+                    for (owned.links) |old| if (std.mem.eql(u8, old.path, link_path)) {
+                        const bytes = (try state.readBytes(&files, self.allocator, old.path, 4096)) orelse return error.InstallForeignLink;
+                        errdefer self.allocator.free(bytes);
+                        if (!std.mem.eql(u8, old.sha256, &hash(bytes)) or
+                            !r.r4u_manifest.targetEquals(owned.actual_path, destination)) return error.InstallForeignLink;
+                        var old_link: shortcut.Shortcut = .{};
+                        try old_link.loadFromBytes(bytes);
+                        if (!r.r4u_manifest.targetEquals(old_link.targetText(), destination)) return error.InstallForeignLink;
+                        // Keep the proven link and its original title when a
+                        // catalog display name changes during an update.
+                        retained_link = bytes;
+                        link_bytes = bytes;
+                        link_hash = hash(bytes);
                         matched = true;
+                        break;
                     };
                     if (!matched) return error.InstallForeignLink;
                 },
@@ -259,14 +289,16 @@ pub const Job = struct {
         if (intent.phase == .pending_restart or (!check and intent.phase == .requested) or
             (intent.catalog.kind != .application and intent.phase == .requested))
         {
-            if (self.stop.requested()) return error.Cancelled;
+            if (self.cancelled()) return error.Cancelled;
             self.progress.set(.installing);
             var result = if (intent.phase == .pending_restart)
                 try engine.resumeAsset(intent.plan())
             else if (self.reconcile_only) return else try engine.installAsset(intent.plan());
-            if (!self.reconcile_only and result.state == .rolled_back) {
+            if (result.state == .rolled_back) {
                 intent.phase = .requested;
                 try saveIntent(files, self.allocator, intent);
+                // Viewing a completed rollback only adjusts our metadata.
+                if (self.reconcile_only) return;
                 result = try engine.installAsset(intent.plan());
             }
             if (!self.reconcile_only and result.exit_code != 0 and std.mem.eql(u8, result.reasonText(), "resume-required")) result = try engine.resumeAsset(intent.plan());

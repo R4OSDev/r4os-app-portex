@@ -8,6 +8,7 @@ const view = @import("view.zig");
 const backend = @import("system_update_engine");
 const shortcut = @import("r4std").shortcut;
 const installation = @import("installation.zig");
+const updates = @import("update_queue.zig");
 
 pub const Snapshot = struct {
     result: catalog.Result = .{},
@@ -15,8 +16,10 @@ pub const Snapshot = struct {
     failure: ?anyerror = null,
     pending_installation: bool = false,
     pending_restart: bool = false,
+    update_queue: ?std.json.Parsed(updates.Queue) = null,
 
     pub fn deinit(self: *Snapshot) void {
+        if (self.update_queue) |value| value.deinit();
         if (self.projection) |*projection| projection.deinit();
         self.result.deinit();
         self.* = .{};
@@ -41,6 +44,13 @@ pub const Job = struct {
         };
         installation.reconcile(self.app, self.allocator) catch |err| {
             snapshot.failure = err;
+        };
+        updates.reconcile(self.app, self.allocator) catch |err| {
+            snapshot.failure = err;
+        };
+        snapshot.update_queue = updates.read(&files, self.allocator) catch |err| blk: {
+            snapshot.failure = err;
+            break :blk null;
         };
         snapshot.pending_installation = installation.pending(&files, self.allocator) catch |err| blk: {
             snapshot.failure = err;

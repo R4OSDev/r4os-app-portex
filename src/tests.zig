@@ -9,6 +9,89 @@ const cache = @import("catalog_cache.zig");
 const policy = @import("catalog_policy.zig");
 const view = @import("view.zig");
 const download = @import("download.zig");
+const updates = @import("update_queue.zig");
+
+test "update selection includes all kinds and preserves actual renamed paths; stale and unavailable are not authorization" {
+    const r = @import("r4os");
+    const load = @import("load_job.zig");
+    var snapshot: load.Snapshot = .{};
+    defer snapshot.deinit();
+    snapshot.result.snapshot = try cache.Snapshot.init(allocator, "https://138.201.253.143:4022", "public", "\"updates\"", example_catalog);
+    snapshot.result.snapshot.?.fresh = true;
+    const catalog_value = snapshot.result.snapshot.?.catalog;
+    const inventory = try allocator.create(r.system_update_inventory.Inventory);
+    defer allocator.destroy(inventory);
+    inventory.* = .{ .count = 3 };
+    var paths: [3][1024]u8 = undefined;
+    for (catalog_value.packages, 0..) |p, i| {
+        const target = switch (p.package_type) {
+            .application => "/Manual/CUSTOM.R4X",
+            .library => try std.fmt.bufPrint(&paths[i], "/R4OS/LIBS/{s}.R4L", .{p.target}),
+            .kernel => "/boot/r4os.elf",
+        };
+        inventory.entries[i] = .{ .name = p.target, .kind = switch (p.package_type) { .application => .r4x, .library => .r4l, .kernel => .kernel }, .version = "0.0.1", .target = target };
+    }
+    snapshot.projection = try view.Projection.build(allocator, catalog_value, .{}, inventory, true);
+    const all = try updates.select(allocator, &snapshot, null);
+    defer allocator.free(all);
+    try std.testing.expectEqual(@as(usize, 3), all.len);
+    var kinds = [_]bool{false} ** 3;
+    for (all) |item| {
+        kinds[@intFromEnum(item.plan.kind)] = true;
+        if (item.plan.kind == .application) try std.testing.expectEqualStrings("C:\\Manual\\CUSTOM.R4X", item.destination);
+    }
+    try std.testing.expect(kinds[0] and kinds[1] and kinds[2]);
+    const one = try updates.select(allocator, &snapshot, 1);
+    defer allocator.free(one);
+    try std.testing.expectEqual(@as(usize, 1), one.len);
+    try std.testing.expectEqual(m.Kind.library, one[0].plan.kind);
+    snapshot.projection.?.rows[0].status = .unavailable;
+    const available = try updates.select(allocator, &snapshot, null);
+    defer allocator.free(available);
+    try std.testing.expectEqual(@as(usize, 2), available.len);
+    snapshot.result.snapshot.?.fresh = false;
+    try std.testing.expectError(error.UpdateSelectionUnavailable, updates.select(allocator, &snapshot, null));
+}
+
+test "durable update queue retains per-package success and rejects changed frozen targets or downgrades" {
+    var plan = try download.Plan.init(package(), "https://138.201.253.143:4022", "public");
+    var items = [_]updates.Item{.{ .frozen = .{ .selection = .{ .plan = plan, .destination = "D:\\Manual\\CUSTOM.R4X", .title = "Original selection", .installed_version = "0.1.9" }, .previous = .{ .size = 10, .sha256 = @splat('c'), .checksum = 42 } }, .status = .installed }, undefined, undefined };
+    items[1] = items[0];
+    items[1].frozen.selection.plan.package_id = "second";
+    items[1].frozen.selection.destination = "D:\\Manual\\SECOND.R4X";
+    items[1].status = .failed;
+    items[1].failure = "ConnectionInterrupted";
+    items[2] = items[0];
+    items[2].frozen.selection.plan.package_id = "third";
+    items[2].frozen.selection.destination = "D:\\Manual\\THIRD.R4X";
+    items[2].status = .queued;
+    var id = try updates.identity(allocator, &items);
+    const queue = updates.Queue{ .id = &id, .items = &items };
+    try queue.validate(allocator);
+    try std.testing.expectEqual(@as(?usize, 1), queue.current());
+    try std.testing.expectEqual(@as(usize, 1), queue.installedCount());
+    var disk: Disk = .{};
+    try updates.save(&disk, allocator, queue);
+    var reopened = (try updates.read(&disk, allocator)).?;
+    defer reopened.deinit();
+    try std.testing.expectEqual(@as(?usize, 1), reopened.value.current());
+    try std.testing.expectEqualStrings("ConnectionInterrupted", reopened.value.items[1].failure.?);
+    items[1].status = .working;
+    items[1].failure = null;
+    try queue.validate(allocator); // Mutable outcome never changes selection.
+    disk.fail_commit = true;
+    try std.testing.expectError(error.BindingCommit, updates.save(&disk, allocator, queue));
+    disk.fail_commit = false;
+    try updates.save(&disk, allocator, queue);
+    items[1].frozen.selection.destination = "D:\\Foreign\\SECOND.R4X";
+    try std.testing.expectError(error.UpdateQueueChanged, queue.validate(allocator));
+    items[1].frozen.selection.destination = "D:\\Manual\\SECOND.R4X";
+    plan.version = "0.1.8";
+    items[1].frozen.selection.plan = plan;
+    id = try updates.identity(allocator, &items);
+    try std.testing.expectError(error.UpdateNotNewer, queue.validate(allocator));
+    std.testing.refAllDecls(updates.Job);
+}
 
 test "original artifact adapter checks create-only plans without adding dependency admission" {
     const engine = @import("system_update_engine");

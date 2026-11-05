@@ -15,7 +15,13 @@ opening the store only observes the real files and known Desktop bindings.
 Libraries and kernel assets use the same owner's durable restart batch.
 The SDK derives and binds the installed BOOT plan; a second explicit action
 authorizes activation and reboot. Reopening only observes staged work.
-Uninstall and application updates follow their later owner adapters.
+Installed catalog apps, libraries and kernel are checked at startup and every
+five minutes while the window is open. Only explicit single/all-update actions
+create a durable frozen selection. Per-package outcomes survive closing and
+reboot; completed items are skipped on retry. Restart artifacts pause remaining
+work until explicit activation and continuation. Each asset retains the existing
+transaction boundary; several system artifacts can need several reboots.
+Uninstall follows its later owner adapter.
 Original-asset downloads run on a joined
 worker with an immutable catalog binding, durable partials, checked Range /
 If-Range continuation, a shared three-retry budget, cancellation and visible

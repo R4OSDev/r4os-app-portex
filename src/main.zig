@@ -3,6 +3,7 @@ const load = @import("load_job.zig");
 const ui = @import("ui.zig");
 const download = @import("download.zig");
 const installation = @import("installation.zig");
+const updates = @import("update_queue.zig");
 const r4std = @import("r4std");
 
 pub fn r4_app_main(app: *r.App) i32 {
@@ -13,7 +14,7 @@ pub fn r4_app_main(app: *r.App) i32 {
     _ = window.setMinimumSize(680, 560);
     var snapshot: load.Snapshot = .{};
     defer snapshot.deinit();
-    var view = ui.Ui{ .window = &window, .allocator = app.system().allocator(), .snapshot = &snapshot, .style = r.gui.Style.light().withSystemFonts(&window.draw), .reload_requested = true, .capabilities = .{ .install = true, .update = true } };
+    var view = ui.Ui{ .window = &window, .allocator = app.system().allocator(), .snapshot = &snapshot, .style = r.gui.Style.light().withSystemFonts(&window.draw), .reload_requested = true, .capabilities = .{ .install = true, .update = true, .update_all = true } };
     defer view.deinit();
     const focus_client = r.desktop_actions.Client{ .sys = window.sys };
     switch (focus_client.focusSnapshot(.{ .window_id = @intCast(window.id) })) {
@@ -25,17 +26,22 @@ pub fn r4_app_main(app: *r.App) i32 {
     var job = load.Job{ .app = app, .allocator = app.system().allocator() };
     var download_job: download.Job = undefined;
     var install_job: installation.Job = undefined;
-    var mode: enum { load, download, install } = .load;
+    var update_job: updates.Job = undefined;
+    var selection: ?[]updates.Selection = null;
+    defer if (selection) |items| app.system().allocator().free(items);
+    var mode: enum { load, download, install, update } = .load;
     var thread: ?r.app_resources.JoinHandle = null;
     const resources = app.resources();
     var closing = false;
     var exit_code: i32 = 0;
     var next_progress_paint: u64 = 0;
+    var next_refresh: u64 = 0;
     const period = r.time_contract.timeoutFinite(r.time_contract.durationFromNanoseconds(100_000_000));
     while (true) {
         closing = closing or app.shouldClose();
         if (closing or view.cancel_requested) {
             switch (mode) {
+                .update => update_job.stop.request(),
                 .download => download_job.stop.request(),
                 .load => job.stop.request(),
                 .install => {
@@ -44,6 +50,46 @@ pub fn r4_app_main(app: *r.App) i32 {
                 },
             }
             view.cancel_requested = false;
+        }
+        // Search only while Portex is open. Defer refresh while an immutable
+        // snapshot is borrowed or the user is interacting with a dialog.
+        if (!closing and thread == null and app.system().ticks() >= next_refresh and
+            !view.detail and !view.customizing and !view.showing_queue and !view.category_open)
+            view.reload_requested = true;
+        const queued_resume = view.pendingUpdates() and (view.resume_requested or view.restart_requested);
+        const queued_new = view.update_all_requested or (view.install_requested != null and view.install_requested.?.replace);
+        if (!closing and thread == null and (queued_resume or queued_new)) {
+            const only = if (view.update_all_requested) null else if (view.install_requested) |request| request.package_index else null;
+            const activating = view.restart_requested;
+            view.update_all_requested = false;
+            view.install_requested = null;
+            view.resume_requested = false;
+            view.restart_requested = false;
+            var ready = queued_resume;
+            if (!queued_resume) {
+                selection = updates.select(app.system().allocator(), &snapshot, only) catch |err| blk: {
+                    snapshot.failure = err;
+                    break :blk null;
+                };
+                ready = selection != null;
+            }
+            if (ready) {
+                const total = if (queued_resume) snapshot.update_queue.?.value.items.len else selection.?.len;
+                update_job = .{ .app = app, .allocator = app.system().allocator(), .selection = selection, .activate = activating, .progress = .{ .total = total } };
+                view.installation_progress = null;
+                view.download_progress = null;
+                view.update_progress = &update_job.progress;
+                switch (resources.createThread(updates.Job.entry, @intFromPtr(&update_job), 512 * 1024)) {
+                    .handle => |handle| { thread = handle; mode = .update; view.busy = true; },
+                    .failure => {
+                        snapshot.failure = error.WorkerUnavailable;
+                        view.update_progress = null;
+                        if (selection) |items| app.system().allocator().free(items);
+                        selection = null;
+                    },
+                }
+            }
+            view.dirty = true;
         }
         if (!closing and (view.install_requested != null or view.resume_requested or view.restart_requested) and thread == null) {
             const request = view.install_requested;
@@ -64,6 +110,7 @@ pub fn r4_app_main(app: *r.App) i32 {
                 } else |err| snapshot.failure = err;
             };
             if (created) {
+                view.update_progress = null;
                 view.installation_progress = &install_job.progress;
                 view.download_progress = if (install_job.download_job) |*dl| &dl.progress else null;
                 switch (resources.createThread(installation.Job.entry, @intFromPtr(&install_job), 512 * 1024)) {
@@ -89,6 +136,7 @@ pub fn r4_app_main(app: *r.App) i32 {
                     // Snapshot and all plan slices remain alive through join.
                     download_job = .{ .app = app, .allocator = app.system().allocator(), .plan = value, .progress = .{ .total = value.size } };
                     view.download_progress = &download_job.progress;
+                    view.update_progress = null;
                     view.installation_progress = null;
                     switch (resources.createThread(download.Job.entry, @intFromPtr(&download_job), 256 * 1024)) {
                         .handle => |handle| {
@@ -127,12 +175,17 @@ pub fn r4_app_main(app: *r.App) i32 {
         if (thread) |*worker| switch (worker.join(if (closing) period else r.time_contract.timeoutPoll())) {
             .exited => {
                 if (mode == .load) {
-                    view.replaced();
+                    view.replaced(&job.output);
                     snapshot.deinit();
                     snapshot = job.output;
                     job.output = .{};
+                    next_refresh = app.system().ticks() +| app.system().monotonicHz() * 300;
                 }
-                if (mode == .install) view.reload_requested = true;
+                if (mode == .install or mode == .update) view.reload_requested = true;
+                if (mode == .update) {
+                    if (selection) |items| app.system().allocator().free(items);
+                    selection = null;
+                }
                 thread = null;
                 view.busy = false;
                 view.dirty = true;
