@@ -1,12 +1,12 @@
 .{
     .name = .r4os_portex,
-    .version = "0.1.0",
+    .version = "0.1.2",
     .fingerprint = 0x1c931aeeb7108226,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .r4os_sdk = .{
-            .url = "https://github.com/R4OSDev/r4os-sdk/archive/56eb19bbebc8444b8766db9b80cc5f7ffd44218a.tar.gz",
-            .hash = "r4os_sdk-0.64.145-NnPzAltv6QFQqNehpgCQnfQzu78gxTw6b-Wh4BEHSV_I",
+            .url = "https://github.com/R4OSDev/r4os-sdk/archive/82bb8bc6df6dc2c5643372c4546ccda99b1b2064.tar.gz",
+            .hash = "r4os_sdk-0.64.148-NnPzAuvL6wEEdssvN646VnAwwTWo_5A034aiDqpXb0KF",
         },
     },
     .paths = .{ "LICENSE", "NOTICE", "README.md", "DOCUMENTATION.de.txt", "THIRD_PARTY_NOTICES.md", "PROVENANCE.txt", "module.R4MF", "build.zig", "build.zig.zon", "src", "Build.ps1", "Build.sh", "Build.bat", "Settings.R4S" },

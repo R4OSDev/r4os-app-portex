@@ -7,12 +7,93 @@ const state = @import("state.zig");
 const client = @import("catalog_client.zig");
 const cache = @import("catalog_cache.zig");
 const policy = @import("catalog_policy.zig");
+const view = @import("view.zig");
+
+test "GUI Unicode scalars with command-like low bytes stay text; CR and LF remain Enter" {
+    const r = @import("r4os");
+    const ui = @import("ui.zig");
+    for ([_]u32{ 0x109, 0x10a, 0x10d, 0x11b, 0x1f60d }) |codepoint| {
+        try std.testing.expectEqual(@as(u8, 0), ui.navigationKey(.{ .window_id = 1, .key = @truncate(codepoint), .codepoint = codepoint, .modifiers = 0, .tick = 0 }));
+    }
+    for ([_]u8{ '\r', '\n' }) |key| try std.testing.expectEqual(r.gui.Key.enter, ui.navigationKey(.{ .window_id = 1, .key = key, .codepoint = key, .modifiers = 0, .tick = 0 }));
+    try std.testing.expectEqual(r.gui.Key.ctrl_a, ui.navigationKey(.{ .window_id = 1, .key = 1, .codepoint = 1, .modifiers = 0, .tick = 0 }));
+}
 
 fn package() m.Package {
     return .{ .package_id = "gh-123-APP", .package_type = .application, .target = "APP", .format = .R4X, .display_name = "A new name", .category = "Tools", .version = "0.1.10", .release = .{ .id = "18446744073709551617", .tag = "v0.1.10", .commit = "b" ** 40 }, .installation = .{ .role = .application, .path = "C:\\Changed", .path_kind = .directory, .activation = .client_managed, .requires_client_plan = false }, .assets = &.{.{ .asset_id = "18446744073709551618", .name = "APP.R4X", .role = "artifact", .size_bytes = 12, .sha256 = sha, .download_url = "/api/v1/packages/gh-123-APP/files/18446744073709551618" }} };
 }
 fn binding() m.Binding {
     return .{ .package_id = "gh-123-APP", .package_type = .application, .target = "APP", .installed_version = "0.1.9", .release_id = "10", .asset_id = "20", .sha256 = sha, .actual_path = "C:\\Chosen\\APP.R4X" };
+}
+
+test "owned GUI projection preserves real paths, stale state and local/unavailable packages" {
+    const r = @import("r4os");
+    const inventory = try allocator.create(r.system_update_inventory.Inventory);
+    defer allocator.destroy(inventory);
+    inventory.* = .{ .count = 3 };
+    inventory.entries[0] = .{ .name = "APP", .kind = .r4x, .version = "0.1.9", .target = "/Chosen/APP.R4X" };
+    inventory.entries[1] = .{ .name = "KERNEL", .kind = .kernel, .version = "0.1.458", .target = "/boot/r4os.elf" };
+    inventory.entries[2] = .{ .name = "SSHD", .kind = .r4x, .version = "0.1.0", .target = "/R4OS/SERVICES/SSHD.R4X" };
+    var later = package();
+    later.display_name = "Zeta";
+    var first = package();
+    first.package_id = "gh-555-OTHER";
+    first.target = "OTHER";
+    first.display_name = "Alpha";
+    var projection = try view.Projection.build(allocator, .{ .schema_version = 1, .packages = &.{ later, first }, .unavailable = &.{.{ .package_id = "gh-900-MISSING", .reason = "local_files_unavailable" }} }, .{ .bindings = &.{binding()} }, inventory, false);
+    defer projection.deinit();
+    try std.testing.expect(!projection.fresh and projection.inventory_known);
+    try std.testing.expectEqual(@as(usize, 4), projection.rows.len); // Services are not store apps.
+    try std.testing.expectEqualStrings("Alpha", projection.rows[0].name);
+    const zeta = projection.rows[3];
+    try std.testing.expectEqual(view.Status.update, zeta.status);
+    try std.testing.expectEqualStrings("C:\\Chosen\\APP.R4X", zeta.actual_path.?);
+    try std.testing.expectEqualStrings("C:\\Chosen\\APP.R4X", zeta.proposed_path.?);
+    try std.testing.expect(zeta.visible(.updates, .application, null, "ZeTa"));
+    try std.testing.expect(!zeta.visible(.discover, .library, null, ""));
+    try std.testing.expect(!zeta.visible(.installed, .application, "Games", ""));
+    try std.testing.expectEqual(view.Status.unavailable, projection.rows[1].status);
+    try std.testing.expectEqual(view.Status.local, projection.rows[2].status);
+    try std.testing.expectEqualStrings("/boot/r4os.elf", projection.rows[2].actual_path.?);
+    try std.testing.expect(projection.rows[1].kind == null);
+    var unknown = try view.Projection.build(allocator, .{ .schema_version = 1, .packages = &.{later}, .unavailable = &.{} }, .{ .bindings = &.{binding()} }, null, true);
+    defer unknown.deinit();
+    try std.testing.expectEqual(view.Status.unverified, unknown.rows[0].status);
+    try std.testing.expect(!unknown.inventory_known);
+}
+
+test "new destinations use client path rules, preserve original filename and never guess a boot target" {
+    const p = package();
+    const standard = try view.resolveNew(p, null);
+    try std.testing.expectEqualStrings("C:\\Changed\\APP.R4X", standard.bytes());
+    const custom = try view.resolveNew(p, "D:\\Software\\Grüße");
+    try std.testing.expectEqualStrings("D:\\Software\\Grüße\\APP.R4X", custom.bytes());
+    try std.testing.expectError(error.ExpectedAbsolute, view.resolveNew(p, "relative"));
+    try std.testing.expectError(error.RootTraversal, view.resolveNew(p, "C:\\..\\Other"));
+    var library = p;
+    library.package_type = .library;
+    library.format = .R4L;
+    var asset = p.assets[0];
+    asset.name = "APP.R4L";
+    library.assets = &.{asset};
+    library.installation = .{ .role = .runtime_library, .path = "/R4OS/LIBS/APP.R4L", .path_kind = .file, .activation = .client_managed, .requires_client_plan = false };
+    const target = try view.resolveNew(library, null);
+    try std.testing.expectEqualStrings("C:\\R4OS\\LIBS\\APP.R4L", target.bytes());
+    try std.testing.expectError(error.OriginalFilenameRequired, view.resolveNew(library, "D:\\LIBS\\OTHER.R4L"));
+    library.package_type = .kernel;
+    try std.testing.expectError(error.BootPlanRequired, view.resolveNew(library, "C:\\guessed.elf"));
+}
+
+test "unimplemented, busy and stale GUI actions remain disabled; uninstall is app-only" {
+    const absent = j.Capabilities{};
+    try std.testing.expect(!absent.allows(.install, true, false, false, true, false));
+    const enabled = j.Capabilities{ .install = true, .update = true, .uninstall = true, .update_all = true };
+    try std.testing.expect(enabled.allows(.install, true, false, false, true, false));
+    try std.testing.expect(!enabled.allows(.install, false, false, false, true, false));
+    try std.testing.expect(!enabled.allows(.update, true, true, true, true, true));
+    try std.testing.expect(!enabled.allows(.update, true, false, true, true, false));
+    try std.testing.expect(!enabled.allows(.uninstall, true, false, true, false, false));
+    try std.testing.expect(enabled.allows(.uninstall, false, false, true, true, false));
 }
 
 test "catalog identity and numeric versions survive rename, changed paths and large string IDs" {

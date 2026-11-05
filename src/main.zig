@@ -1,90 +1,108 @@
-const std = @import("std");
-const r4os = @import("r4os");
-const model = @import("model.zig");
-const state = @import("state.zig");
-const catalog = @import("catalog_client.zig");
+const r = @import("r4os");
+const load = @import("load_job.zig");
+const ui = @import("ui.zig");
 
-const CatalogJob = struct {
-    app: *r4os.App,
-    allocator: std.mem.Allocator,
-    stop: r4os.app_contract.StopFlag = .{},
-    result: catalog.Result = .{},
-
-    fn entry(context: u64) callconv(.c) i32 {
-        const self: *CatalogJob = @ptrFromInt(context);
-        self.result = catalog.refresh(self.app, self.allocator, &self.stop);
-        return 0;
-    }
-};
-
-fn paint(window: *r4os.Window, status: [*:0]const u8) i32 {
-    var p = switch (window.beginPaint()) {
-        .paint => |v| v,
-        .failure => |n| return n,
-    };
-    defer p.discard();
-    _ = p.canvas.clear(0x19151E);
-    _ = p.canvas.text(24, 24, "Portex", 0xF7F0FF, 0x19151E);
-    _ = p.canvas.text(24, 58, "Software fuer R4OS", 0xB6A8C6, 0x19151E);
-    _ = p.canvas.text(24, 100, status, 0xB6A8C6, 0x19151E);
-    return p.present();
-}
-
-pub fn r4_app_main(app: *r4os.App) i32 {
-    // Keep the same typed catalog/bindings in the actual freestanding graph.
-    _ = model.Catalog;
-    const sys = app.system();
-    const files = app.files() orelse return -5;
-    const bindings = state.load(&files, sys.allocator(), state.default_path) catch {
-        sys.println("Portex: gespeicherte Paketzuordnung konnte nicht gelesen werden.");
-        return -6;
-    };
-    defer bindings.deinit();
-    var timers: [1]r4os.Timer = .{.{}};
-    var window = r4os.Window.init(app.system(), app.desktop() orelse return -1, app.drawing() orelse return -1, &timers) orelse return -2;
+pub fn r4_app_main(app: *r.App) i32 {
+    var timers: [0]r.Timer = .{};
+    var window = r.Window.init(app.system(), app.desktop() orelse return -1, app.drawing() orelse return -1, &timers) orelse return -2;
     _ = window.setTitle("Portex");
-    var status: [384:0]u8 = .{0} ** 384;
-    const initial = "Softwarekatalog wird geladen...";
-    @memcpy(status[0..initial.len], initial);
-    if (paint(&window, &status) < 0) return -3;
-    var job = CatalogJob{ .app = app, .allocator = sys.allocator() };
+    _ = window.setMinimumSize(680, 560);
+    var snapshot: load.Snapshot = .{};
+    defer snapshot.deinit();
+    var view = ui.Ui{ .window = &window, .allocator = app.system().allocator(), .snapshot = &snapshot, .style = r.gui.Style.light().withSystemFonts(&window.draw), .reload_requested = true };
+    defer view.deinit();
+    const focus_client = r.desktop_actions.Client{ .sys = window.sys };
+    switch (focus_client.focusSnapshot(.{ .window_id = @intCast(window.id) })) {
+        .reply => |reply| if (reply.result == 0) {
+            view.active = reply.snapshot.focus_state == r.abi.desktop_focus_state_focused;
+        },
+        .failure => {},
+    }
+    var job = load.Job{ .app = app, .allocator = app.system().allocator() };
+    var thread: ?r.app_resources.JoinHandle = null;
     const resources = app.resources();
-    if (!resources.available()) return -7;
-    var thread = switch (resources.createThread(CatalogJob.entry, @intFromPtr(&job), 256 * 1024)) {
-        .handle => |handle| handle,
-        .failure => return -7,
-    };
     var closing = false;
     var exit_code: i32 = 0;
-    const period = r4os.time_contract.timeoutFinite(r4os.time_contract.durationFromNanoseconds(100_000_000));
-    // Keep every borrowed app/job/result buffer until the native join receipt.
+    const period = r.time_contract.timeoutFinite(r.time_contract.durationFromNanoseconds(100_000_000));
     while (true) {
         closing = closing or app.shouldClose();
-        if (closing) job.stop.request();
-        if (thread.valid()) switch (thread.join(if (closing) period else r4os.time_contract.timeoutPoll())) {
+        if (closing or view.cancel_requested) {
+            job.stop.request();
+            view.cancel_requested = false;
+        }
+        if (!closing and view.reload_requested and thread == null) {
+            view.reload_requested = false;
+            job = .{ .app = app, .allocator = app.system().allocator() };
+            switch (resources.createThread(load.Job.entry, @intFromPtr(&job), 256 * 1024)) {
+                .handle => |handle| {
+                    thread = handle;
+                    view.busy = true;
+                },
+                .failure => {
+                    snapshot.failure = error.WorkerUnavailable;
+                    view.busy = false;
+                },
+            }
+            view.dirty = true;
+        }
+        if (thread) |*worker| switch (worker.join(if (closing) period else r.time_contract.timeoutPoll())) {
             .exited => {
-                @memset(&status, 0);
-                _ = catalog.describe(&job.result, &status);
-                if (!closing and paint(&window, &status) < 0) {
-                    closing = true;
-                    exit_code = -4;
-                }
+                view.replaced();
+                snapshot.deinit();
+                snapshot = job.output;
+                job.output = .{};
+                thread = null;
+                view.busy = false;
             },
             .timed_out => {},
             .failure => {
                 closing = true;
                 exit_code = -8;
-                if (thread.valid()) sys.sleepTicks(@max(1, sys.monotonicHz() / 10));
+                app.system().sleepTicks(@max(1, app.system().monotonicHz() / 10));
             },
         };
-        if (closing and !thread.valid()) break;
-        if (closing) continue;
+        if (closing) {
+            if (thread == null) break;
+            continue;
+        }
+        if (view.dirty) {
+            view.dirty = false;
+            if (!view.paint()) {
+                closing = true;
+                exit_code = -3;
+                continue;
+            }
+        }
         switch (window.waitMessage(period)) {
             .message => |message| switch (message) {
                 .close => closing = true,
-                .resize => if (paint(&window, &status) < 0) {
-                    closing = true;
-                    exit_code = -4;
+                .resize => {
+                    view.release();
+                    view.dirty = true;
+                },
+                .font_changed => {
+                    view.style = view.style.withSystemFonts(&window.draw);
+                    view.dirty = true;
+                },
+                .key => |key| view.key(key),
+                .mouse => |mouse| view.mouse(mouse),
+                .wheel => |wheel| view.wheel(wheel.delta),
+                .focus_gained => {
+                    view.active = true;
+                    view.dirty = true;
+                },
+                .focus_lost => {
+                    view.active = false;
+                    view.release();
+                    view.dirty = true;
+                },
+                .input_reset => {
+                    view.release();
+                    view.dirty = true;
+                },
+                .pointer_capture => |capture| {
+                    if (capture.state == r.abi.gui_pointer_state_cancelled) view.release();
+                    view.dirty = true;
                 },
                 else => {},
             },
@@ -95,6 +113,5 @@ pub fn r4_app_main(app: *r4os.App) i32 {
             else => {},
         }
     }
-    job.result.deinit();
     return exit_code;
 }

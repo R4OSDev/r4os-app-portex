@@ -210,6 +210,7 @@ pub fn describe(result: *const Result, output: []u8) [:0]const u8 {
             .unavailable_web => "HTTPS nicht verfuegbar",
         };
         const detail = if (failure.transport) |e| @tagName(e) else if (failure.cause) |e| @errorName(e) else "";
+        if (failure.http_status == 0) return std.fmt.bufPrintZ(output, "{s}{s}{s}{s}", .{ reason, if (detail.len != 0) "; " else "", detail, if (result.snapshot != null) "; gespeicherter Katalog ist veraltet" else "" }) catch "Katalogabruf fehlgeschlagen";
         return std.fmt.bufPrintZ(output, "{s}; HTTP {d} {s}{s}", .{ reason, failure.http_status, detail, if (result.snapshot != null) "; gespeicherter Katalog ist veraltet" else "" }) catch "Katalogabruf fehlgeschlagen";
     }
     if (result.snapshot) |s| return std.fmt.bufPrintZ(output, "Katalog aktuell: {d} Pakete{s}{s}{s}", .{

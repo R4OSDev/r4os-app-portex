@@ -11,9 +11,27 @@ bei UPDSVC/SYSUPD und der gemeinsamen Update-Engine.
 0.89.43 stellt das Projekt, das typisierte Paket-/Bindungsmodell und
 generationstreue UI-Auftragsbeobachtung bereit. 0.89.44 ergänzt den
 Softwarekatalog über R4SRV und verifiziertes HTTPS. Die bestätigte
-Prisma-GUI folgt auf die gemeinsame SDK-Grundlage. IMAGE_SCOPE=none verhindert
+Prisma-GUI ist ab0.89.49 mit SDK148 nativ umgesetzt. IMAGE_SCOPE=none verhindert
 die vorzeitige Auslieferung dieser Entwicklungsoberfläche. Slim/Full werden
 im abschließenden Integrationsschritt aktiviert.
+
+Native Ansicht
+--------------
+Entdecken, Meine Software und Updates verwenden die gemeinsamen modernen
+SDK-Controls. Apps/Libraries/Kernel stehen mit der rechtsbuendigen Suche auf
+einer Ebene; Kategorien filtern die alphabetischen Karten. Eine vorgestellte
+App erscheint im normalen Entdecken nicht nochmals in der Liste. Suche findet
+sie weiterhin als regulaeren Eintrag. Der Titel lautet Portex; die aeussere
+Titelleiste zeichnet der Desktop mit den optionalen Manifestfarben.
+Die Designreferenz bleibt unter Design/Prisma.html erhalten.
+
+Paketdetails zeigen angebotene/installierte Version, Zustand und Ziel.
+Anpassen bestaetigt fuer neue Apps einen Ordner plus Originaldateinamen,
+fuer Libraries das konkrete Dateiziel. Vorhandene Pfade bleiben massgeblich.
+Ein Bootpfad aus dem Inventar ist kein geratener DOS-Laufwerksplan.
+Installationsaktionen brauchen die wirklichen Backendfaehigkeiten und bleiben
+bis zu deren Implementierung gesperrt. Katalog, Zuordnung und Komponenten-
+inventar laden im Worker; Close/Cancel halten dessen Leihen bis zum Join.
 
 Paketvertrag
 ------------

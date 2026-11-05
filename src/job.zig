@@ -2,6 +2,25 @@
 pub const Phase = enum { idle, downloading, verifying, ready, staging, pending_restart, installed, rolled_back, failed, cancelled };
 pub const Token = struct { request: u64, process: u32, generation: u64 };
 pub const Receipt = struct { backend_job: u64, phase: Phase };
+pub const Action = enum { install, update, uninstall, update_all };
+/// A control needs an implemented owner adapter and an observed, unambiguous
+/// installation. Offline browsing never authorizes a new mutation.
+pub const Capabilities = struct {
+    install: bool = false,
+    update: bool = false,
+    uninstall: bool = false,
+    update_all: bool = false,
+
+    pub fn allows(self: Capabilities, action: Action, fresh: bool, busy: bool, installed: bool, application: bool, newer: bool) bool {
+        if (busy) return false;
+        return switch (action) {
+            .install => self.install and fresh and !installed,
+            .update => self.update and fresh and installed and newer,
+            .uninstall => self.uninstall and installed and application,
+            .update_all => self.update_all and fresh and newer,
+        };
+    }
+};
 pub const Job = struct {
     token: Token,
     phase: Phase = .idle,
