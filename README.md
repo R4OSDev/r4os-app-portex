@@ -8,8 +8,12 @@ package kinds, categories, search, alphabetical cards and package details.
 Catalog, bindings and installed inventory load on a joined worker. Stale,
 unavailable, unverified and local-only states stay distinct. New destinations
 preserve the original filename; existing installations retain their path.
-Mutation controls require real owner capabilities and remain disabled until
-their installation adapters exist. Original-asset downloads run on a joined
+R4X installation and targeted adoption use the SDK's existing journal and
+inventory transaction owner. A durable request also binds the actual path,
+version, original bytes and owned R4LNK. Interrupted work can be resumed;
+opening the store only observes the real files and known Desktop bindings.
+Update, uninstall and system activation controls follow their owner adapters.
+Original-asset downloads run on a joined
 worker with an immutable catalog binding, durable partials, checked Range /
 If-Range continuation, a shared three-retry budget, cancellation and visible
 byte/percentage/rate/error status. Only a complete size/SHA-256 readback yields
@@ -27,7 +31,7 @@ metadata cannot establish installation without a matching actual component.
 No runtime dependency or compatibility prechecks are added in this version.
 
 The accepted visual reference is preserved in `Design/Prisma.html`. Native
-rendering uses the public SDK148 controls and optional manifest title colors;
+rendering uses the public SDK controls and optional manifest title colors;
 the Desktop draws the outer frame. Current system fonts remain bitmap fonts.
 
 Original R4OS code is licensed under Apache-2.0. See `LICENSE` and `NOTICE`.

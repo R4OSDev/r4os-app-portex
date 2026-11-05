@@ -55,12 +55,38 @@ sie weiterhin als regulaeren Eintrag. Der Titel lautet Portex; die aeussere
 Titelleiste zeichnet der Desktop mit den optionalen Manifestfarben.
 Die Designreferenz bleibt unter Design/Prisma.html erhalten.
 
+R4X-Installation ab0.89.51
+------------------------
+Installieren laedt und prueft die Originaldatei und uebergibt sie an die
+gemeinsame SDK-Update-Engine. Diese erstellt einen lokalen R4U-Umschlag und
+verwendet ihre bestehenden SYSLOCK-, Journal-, Inventar- und Rollbackpfade.
+Neue Ziele sind create-only; vorhandene Dateien brauchen eine explizite,
+erneut gepruefte technische Identitaet und alte Hashbindung. Laufende Apps
+werden vom bestehenden Backend abgewiesen. Es gibt keine Dependency- oder
+Versionsvorpruefung zusaetzlich zum normalen Format-/Loadervertrag.
+
+JOB.JSON bindet den Auftrag vor der Dateiwirkung dauerhaft an Quelle und
+tatsaechliches Ziel. Erst bestaetigte Datei-/Inventarbelege erlauben die
+eigene Desktop-Verknuepfung und BINDINGS.JSON. R4STD:SETTINGS_V1 ist dafuer
+deklariert und initialisiert; R4STD definiert die R4LNK-Serialisierung.
+Wiederaufnehmen arbeitet auf dem gespeicherten Auftrag, auch nach Fenster-
+oder Systemneustart. Ein Fehlercode steht am Anfang der Statuszeile;
+INSTALL.LOG bewahrt Installationsfehler ohne Zugangsdaten.
+
+Vorhandene R4X zuordnen nimmt eine gezielt angegebene Datei an. Entscheidend
+sind die echte R4M0-Identitaet und Version; Anzeigename/Dateiname reichen
+nicht. Inventar und bekannte Desktoplinks liefern weitere beobachtete Orte,
+ohne globalen Dateisystemscan. Gespeicherte Bindungen werden auch gegen den
+tatsaechlichen Dateihash geprueft. Unbekannte historische Release-/Asset-IDs
+bleiben bei einer Uebernahme null. Nutzer- und Zusatzdateien bleiben erhalten.
+
 Paketdetails zeigen angebotene/installierte Version, Zustand und Ziel.
 Anpassen bestaetigt fuer neue Apps einen Ordner plus Originaldateinamen,
 fuer Libraries das konkrete Dateiziel. Vorhandene Pfade bleiben massgeblich.
 Ein Bootpfad aus dem Inventar ist kein geratener DOS-Laufwerksplan.
-Installationsaktionen brauchen die wirklichen Backendfaehigkeiten und bleiben
-bis zu deren Implementierung gesperrt. Katalog, Zuordnung und Komponenten-
+R4X-Installation und gezielte Uebernahme verwenden den wirklichen
+Installationsbesitzer. Weitere Mutationen bleiben bis zu ihren Adaptern
+gesperrt. Katalog, Zuordnung und Komponenten-
 inventar laden im Worker; Close/Cancel halten dessen Leihen bis zum Join.
 
 Paketvertrag
@@ -76,7 +102,7 @@ liefern. Portex errät keinen Kernelpfad.
 Installationszuordnung
 ---------------------
 Die gespeicherte Katalogbindung enthält Paketart, technische Identität,
-Version, konkrete Release-/Asset-ID, geprüften Hash, tatsächlichen Dateipfad
+Version, bekannte Release-/Asset-ID, geprüften Hash, tatsächlichen Dateipfad
 und nachgewiesene eigene Links. Sie ist kein zweites Komponenteninventar.
 Die Anzeige installiert verlangt den Abgleich mit dem realen Komponentenbestand.
 Fehlende oder abweichende Einträge bleiben unbestätigt. Ein alter Katalog,

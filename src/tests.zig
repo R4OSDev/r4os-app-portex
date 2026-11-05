@@ -10,6 +10,30 @@ const policy = @import("catalog_policy.zig");
 const view = @import("view.zig");
 const download = @import("download.zig");
 
+test "original artifact adapter checks create-only plans without adding dependency admission" {
+    const engine = @import("system_update_engine");
+    try engine.asset.validate(.{ .source = "C:\\TEMP\\ORIG.R4X", .target = "D:\\Games\\Grüße\\APP.R4X", .name = "APP", .version = "0.1.0", .size = 12, .sha256 = sha });
+    try std.testing.expectError(error.AssetPlan, engine.asset.validate(.{ .source = "C:\\TEMP\\ORIG.R4X", .target = "C:\\BOOT\\APP.R4X", .name = "APP", .version = "0.1.0", .size = 12, .sha256 = sha }));
+    std.testing.refAllDecls(engine.Engine);
+    std.testing.refAllDecls(@import("installation.zig").Job);
+    std.testing.refAllDecls(@import("load_job.zig"));
+}
+
+test "installation uses the real R4STD link writer and preserves a chosen Unicode target" {
+    try @import("r4std_test").ensure();
+    const shortcut = @import("r4std").shortcut;
+    const target = "D:\\Software\\Grüße\\MINESWEEPER_665F9DD0.R4X";
+    var link = try shortcut.Shortcut.init(target);
+    try link.setTitle("Minesweeper");
+    try link.setWorkdir("D:\\Software\\Grüße");
+    var buffer: [4096]u8 = undefined;
+    const bytes = try link.writeTo(&buffer);
+    var parsed: shortcut.Shortcut = .{};
+    try parsed.loadFromBytes(bytes);
+    try std.testing.expectEqualStrings(target, parsed.targetText());
+    try std.testing.expectEqualStrings("D:\\Software\\Grüße", parsed.workdirText());
+}
+
 test "download head validates immutable metadata and full or resumed lengths before writing" {
     var p = package();
     const plan = try download.Plan.init(p, "https://138.201.253.143:4022", "public");
@@ -294,30 +318,48 @@ test "cancel requests and stale worker receipts cannot report durable installati
 const Disk = struct {
     current: [32768]u8 = undefined,
     stage: [32768]u8 = undefined,
+    backup: [32768]u8 = undefined,
+    intent: [512]u8 = undefined,
     current_len: usize = 0,
     stage_len: usize = 0,
+    backup_len: usize = 0,
+    intent_len: usize = 0,
     fail_commit: bool = false,
+    fail_delete: bool = false,
     writes: usize = 0,
 
     fn staged(path: anytype) bool {
         return std.mem.endsWith(u8, path.bytes(), ".NEW");
     }
+    fn slice(self: *Disk, path: anytype) []u8 {
+        if (staged(path)) return self.stage[0..self.stage_len];
+        if (std.mem.endsWith(u8, path.bytes(), ".BAK")) return self.backup[0..self.backup_len];
+        if (std.mem.endsWith(u8, path.bytes(), ".TXN")) return self.intent[0..self.intent_len];
+        return self.current[0..self.current_len];
+    }
     pub fn info(self: *Disk, path: anytype) union(enum) { value: struct { size: u64, is_dir: u8 = 0 }, missing, failure: i32 } {
-        const n = if (staged(path)) self.stage_len else self.current_len;
+        const n = self.slice(path).len;
         return if (n == 0) .missing else .{ .value = .{ .size = n } };
     }
     pub fn read(self: *Disk, path: anytype, out: []u8) union(enum) { bytes: u32, end, failure: i32 } {
-        const bytes = if (staged(path)) self.stage[0..self.stage_len] else self.current[0..self.current_len];
+        const bytes = self.slice(path);
         if (out.len != bytes.len) return .{ .failure = -1 };
         @memcpy(out, bytes);
         return .{ .bytes = @intCast(bytes.len) };
     }
     const Writer = struct {
         disk: *Disk,
+        intent: bool,
         pub fn write(self: *Writer, bytes: []const u8) enum { ok, failure } {
-            if (bytes.len > self.disk.stage.len) return .failure;
-            @memcpy(self.disk.stage[0..bytes.len], bytes);
-            self.disk.stage_len = bytes.len;
+            if (self.intent) {
+                if (bytes.len > self.disk.intent.len) return .failure;
+                @memcpy(self.disk.intent[0..bytes.len], bytes);
+                self.disk.intent_len = bytes.len;
+            } else {
+                if (bytes.len > self.disk.stage.len) return .failure;
+                @memcpy(self.disk.stage[0..bytes.len], bytes);
+                self.disk.stage_len = bytes.len;
+            }
             self.disk.writes += 1;
             return .ok;
         }
@@ -325,12 +367,17 @@ const Disk = struct {
             return .ok;
         }
         pub fn abort(self: *Writer) enum { ok, failure } {
-            self.disk.stage_len = 0;
+            if (self.intent) self.disk.intent_len = 0 else self.disk.stage_len = 0;
             return .ok;
         }
     };
-    pub fn streamWriter(self: *Disk, _: anytype, _: u32) union(enum) { writer: Writer, failure: i32 } {
-        return .{ .writer = .{ .disk = self } };
+    pub fn streamWriter(self: *Disk, path: anytype, _: u32) union(enum) { writer: Writer, failure: i32 } {
+        return .{ .writer = .{ .disk = self, .intent = std.mem.endsWith(u8, path.bytes(), ".TXN") } };
+    }
+    pub fn delete(self: *Disk, path: anytype) enum { ok, failure } {
+        if (self.fail_delete) return .failure;
+        if (staged(path)) self.stage_len = 0 else if (std.mem.endsWith(u8, path.bytes(), ".BAK")) self.backup_len = 0 else if (std.mem.endsWith(u8, path.bytes(), ".TXN")) self.intent_len = 0 else return .failure;
+        return .ok;
     }
     pub fn replaceAtomic(self: *Disk, _: anytype, stage_path: anytype, backup_path: anytype, _: struct {}) enum { ok, failure } {
         // Preserve the real atomic owner's stage/backup short-name contract.
@@ -341,7 +388,9 @@ const Disk = struct {
             if (dot == 0 or dot > 8 or name.len - dot - 1 > 3 or
                 std.mem.indexOfScalar(u8, name[dot + 1 ..], '.') != null) return .failure;
         }
-        if (self.fail_commit) return .failure;
+        if (self.fail_commit or self.backup_len != 0) return .failure;
+        @memcpy(self.backup[0..self.current_len], self.current[0..self.current_len]);
+        self.backup_len = self.current_len;
         @memcpy(self.current[0..self.stage_len], self.stage[0..self.stage_len]);
         self.current_len = self.stage_len;
         self.stage_len = 0;
@@ -367,6 +416,18 @@ test "binding storage preserves old data on failed commit and resumes its exact 
     const reopened = try state.load(&disk, allocator, state.default_path);
     defer reopened.deinit();
     try std.testing.expectEqualStrings(binding().actual_path, reopened.value.find(binding().package_id).?.actual_path);
+    // A third distinct write used to fail because .BAK was never settled.
+    disk.fail_delete = true;
+    try std.testing.expectError(error.BindingCleanup, state.save(&disk, allocator, state.default_path, .{}));
+    try std.testing.expect(disk.backup_len > 0 and disk.intent_len > 0);
+    disk.fail_delete = false;
+    try state.save(&disk, allocator, state.default_path, .{});
+    try std.testing.expect(disk.backup_len == 0 and disk.intent_len == 0);
+    try state.save(&disk, allocator, state.default_path, .{ .bindings = &.{binding()} });
+    @memcpy(disk.backup[0..7], "foreign");
+    disk.backup_len = 7;
+    try std.testing.expectError(error.BindingBackupConflict, state.save(&disk, allocator, state.default_path, .{}));
+    try std.testing.expectEqualStrings("foreign", disk.backup[0..disk.backup_len]);
 }
 
 const empty_catalog = "{\"schema_version\":1,\"packages\":[],\"unavailable\":[]}";

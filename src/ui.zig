@@ -8,10 +8,12 @@ const jobs = @import("job.zig");
 const load = @import("load_job.zig");
 const catalog = @import("catalog_client.zig");
 const download = @import("download.zig");
+const installation = @import("installation.zig");
 const tabs = [_]g.TabItem{ .{ .text = "Entdecken" }, .{ .text = "Meine Software" }, .{ .text = "Updates" } };
 const kinds = [_][:0]const u8{ "Apps", "Libraries", "Kernel" };
 const focus_items = [_]g.FocusItem{ .{}, .{}, .{}, .{}, .{}, .{} };
-const Action = union(enum) { tab: usize, kind: usize, search, category_toggle, category: usize, refresh, cancel, previous, next, row: usize, detail_close, customize, path_field, path_apply, path_cancel, download, install, update, uninstall, update_all };
+const Action = union(enum) { tab: usize, kind: usize, search, category_toggle, category: usize, refresh, cancel, resume_install, adopt, previous, next, row: usize, detail_close, customize, path_field, path_apply, path_cancel, download, install, update, uninstall, update_all };
+pub const InstallRequest = struct { package_index: usize, destination: r.AbsoluteFilePath, adopt: bool = false };
 const Hit = struct { action: Action, rect: g.Rect };
 const Custom = struct { id: []u8, destination: r.AbsoluteFilePath };
 
@@ -42,12 +44,16 @@ pub const Ui = struct {
     page_size: usize = 1,
     detail: bool = false,
     customizing: bool = false,
+    adopting: bool = false,
     dirty: bool = true,
     active: bool = false,
     busy: bool = false,
     reload_requested: bool = false,
     cancel_requested: bool = false,
     download_requested: ?usize = null,
+    install_requested: ?InstallRequest = null,
+    resume_requested: bool = false,
+    installation_progress: ?*const installation.Progress = null,
     download_progress: ?*const download.Progress = null,
     focus: g.FocusState = .{ .index = 2 },
     hover: ?Action = null,
@@ -151,8 +157,10 @@ pub const Ui = struct {
     }
     fn allowed(self: *const Ui, action: jobs.Action, item: ?v.Row) bool {
         const p = self.projection() orelse return false;
+        if (self.snapshot.pending_installation) return false;
         const installed = if (item) |i| i.status == .installed or i.status == .update else false;
         const newer = if (item) |i| i.status == .update else self.tab == .updates and self.visible_count > 0;
+        if (action == .install and (item == null or item.?.kind != .application or item.?.status != .available)) return false;
         return self.capabilities.allows(action, p.fresh and p.inventory_known and self.snapshot.failure == null, self.busy, installed, if (item) |i| i.kind == .application else false, newer);
     }
     fn featured(self: *const Ui, p: *const v.Projection) ?usize {
@@ -186,6 +194,7 @@ pub const Ui = struct {
         if (canvas.clear(self.style.background) < 0) return false;
         if (!self.label(canvas.withTextRole(.heading), .{ .x = 24, .y = 14, .w = 230, .h = 38 }, "Portex", self.style.text, self.style.background)) return false;
         if (!self.button(canvas, if (self.busy) .cancel else .refresh, .{ .x = canvas.w - 190, .y = 18, .w = 166, .h = 34 }, if (self.busy) "Abbrechen" else "Neu laden", true, false, self.focus.index == 5)) return false;
+        if (self.snapshot.pending_installation and !self.busy and !self.button(canvas, .resume_install, .{ .x = canvas.w - 428, .y = 18, .w = 226, .h = 34 }, "Wiederaufnehmen", true, true, false)) return false;
         var scratch: [1024]u8 = undefined;
         const navigation = canvas.layoutTabs(.{ .rect = .{ .x = 22, .y = 60, .w = canvas.w - 44, .h = 34 }, .items = &tabs, .selected_index = @intFromEnum(self.tab), .focused = self.active and self.focus.index == 0 });
         if (navigation.draw(canvas, &scratch) < 0) return false;
@@ -200,7 +209,7 @@ pub const Ui = struct {
         if (!self.paintRows(canvas)) return false;
         if (!self.button(canvas, .previous, .{ .x = canvas.w - 132, .y = canvas.h - 78, .w = 48, .h = 30 }, "<", self.first > 0, false, false) or !self.button(canvas, .next, .{ .x = canvas.w - 72, .y = canvas.h - 78, .w = 48, .h = 30 }, ">", self.first + self.page_size < self.visible_count, false, false)) return false;
         var status: [768]u8 = undefined;
-        const text = if (self.download_progress) |progress| progress.describe(&status) else if (self.busy) "Katalog wird geladen; die Ansicht bleibt bedienbar." else if (self.snapshot.failure) |err| std.fmt.bufPrint(&status, "Bestand konnte nicht vollstaendig gelesen werden: {s}", .{@errorName(err)}) catch "Bestand unbekannt" else catalog.describe(&self.snapshot.result, &status);
+        const text = if (self.installation_progress) |progress| progress.describe(&status) else if (self.download_progress) |progress| progress.describe(&status) else if (self.busy) "Katalog wird geladen; die Ansicht bleibt bedienbar." else if (self.snapshot.failure) |err| std.fmt.bufPrint(&status, "Bestand konnte nicht vollstaendig gelesen werden: {s}", .{@errorName(err)}) catch "Bestand unbekannt" else catalog.describe(&self.snapshot.result, &status);
         if (self.download_progress) |progress| {
             var counts: [256]u8 = undefined;
             if (!self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 76, .w = canvas.w - 180, .h = 24 }, progress.counts(&counts), self.style.text, self.style.background)) return false;
@@ -274,7 +283,7 @@ pub const Ui = struct {
             self.path_field.focused = self.active;
             const field = g.Rect{ .x = box.x, .y = box.y + 164, .w = box.w, .h = 34 };
             if (self.path_field.draw(canvas, field, &scratch) < 0 or !self.hit(.path_field, field, true)) return false;
-            if (!self.label(canvas, .{ .x = box.x, .y = box.y + 204, .w = box.w, .h = 24 }, if (self.path_error) |err| pathError(err) else if (item.kind == .application) "Ordner waehlen; Originaldateiname bleibt erhalten." else "Dateiziel mit unveraendertem Originaldateinamen.", self.style.muted, self.style.surface)) return false;
+            if (!self.label(canvas, .{ .x = box.x, .y = box.y + 204, .w = box.w, .h = 24 }, if (self.path_error) |err| pathError(err) else if (self.adopting) "Vorhandene R4X-Datei angeben; technische Identitaet wird geprueft." else if (item.kind == .application) "Ordner waehlen; Originaldateiname bleibt erhalten." else "Dateiziel mit unveraendertem Originaldateinamen.", self.style.muted, self.style.surface)) return false;
             return self.button(canvas, .path_cancel, .{ .x = dialog.rect.right() - 338, .y = dialog.rect.bottom() - 54, .w = 140, .h = 32 }, "Abbrechen", true, false, false) and self.button(canvas, .path_apply, .{ .x = dialog.rect.right() - 184, .y = dialog.rect.bottom() - 54, .w = 160, .h = 32 }, "Uebernehmen", true, true, false);
         }
         if (!self.label(canvas, .{ .x = box.x, .y = box.y + 164, .w = box.w - 150, .h = 32 }, self.destination(item.*) orelse "Bootplan erforderlich", self.style.text, self.style.surface)) return false;
@@ -283,7 +292,8 @@ pub const Ui = struct {
         if (!self.label(canvas, .{ .x = box.x, .y = box.y + 206, .w = box.w, .h = 24 }, item.statusText(), self.style.muted, self.style.surface)) return false;
         if (item.kind != .application and !self.label(canvas, .{ .x = box.x, .y = box.y + 236, .w = box.w, .h = 24 }, "Aktivierung ueber Systemupdate; Neustart erforderlich.", self.style.muted, self.style.surface)) return false;
         const can_download = !self.busy and item.package_index != null and self.snapshot.result.snapshot != null and self.snapshot.result.snapshot.?.fresh;
-        if (!self.button(canvas, .download, .{ .x = box.x, .y = box.y + 268, .w = 240, .h = 32 }, "Herunterladen", can_download, false, self.focus.index == 4)) return false;
+        if (!self.button(canvas, .download, .{ .x = box.x, .y = box.y + 268, .w = 210, .h = 32 }, "Herunterladen", can_download, false, self.focus.index == 4)) return false;
+        if (item.kind == .application and !self.button(canvas, .adopt, .{ .x = box.x + 226, .y = box.y + 268, .w = box.w - 226, .h = 32 }, "Vorhandene R4X zuordnen", can_download and !self.snapshot.pending_installation and item.status != .conflict, false, false)) return false;
         const button_y = dialog.rect.bottom() - 54;
         if (!self.button(canvas, .detail_close, .{ .x = dialog.rect.x + 24, .y = button_y, .w = 140, .h = 32 }, "Schliessen", true, false, self.focus.index == 0)) return false;
         if (item.kind == .application and !self.button(canvas, .uninstall, .{ .x = dialog.rect.right() - 388, .y = button_y, .w = 180, .h = 32 }, "Deinstallieren", self.allowed(.uninstall, item.*), false, self.focus.index == 2)) return false;
@@ -333,6 +343,15 @@ pub const Ui = struct {
                 if (!self.busy) self.reload_requested = true;
             },
             .cancel => self.cancel_requested = true,
+            .resume_install => self.resume_requested = !self.busy,
+            .adopt => {
+                const item = self.row() orelse return;
+                if (self.busy or item.package_index == null or item.kind != .application) return;
+                if (!self.path_field.setExact(self.destination(item.*) orelse "C:\\")) return;
+                self.adopting = true;
+                self.customizing = true;
+                self.path_error = null;
+            },
             .download => {
                 const item = self.row() orelse return;
                 if (self.busy or item.package_index == null or self.snapshot.result.snapshot == null or !self.snapshot.result.snapshot.?.fresh) return;
@@ -366,12 +385,29 @@ pub const Ui = struct {
                 const value = if (p.installation.path_kind == .directory) path[0..@max(3, std.mem.lastIndexOfScalar(u8, path, '\\') orelse return)] else path;
                 if (!self.path_field.setExact(value)) return;
                 self.customizing = true;
+                self.adopting = false;
                 self.path_error = null;
             },
             .path_field => {},
             .path_cancel => self.customizing = false,
             .path_apply => {
                 const p = self.package() orelse return;
+                if (self.adopting) {
+                    const item = self.row() orelse return;
+                    const path = r.AbsoluteFilePath.parse(self.path_field.value()) catch |err| {
+                        self.path_error = err;
+                        return;
+                    };
+                    if (item.actual_path) |actual| if (!v.samePath(path.bytes(), actual)) {
+                        self.path_error = error.BindingConflict;
+                        return;
+                    };
+                    self.install_requested = .{ .package_index = item.package_index orelse return, .destination = path, .adopt = true };
+                    self.detail = false;
+                    self.customizing = false;
+                    self.focus.index = 5;
+                    return;
+                }
                 const destination_value = v.resolveNew(p, self.path_field.value()) catch |err| {
                     self.path_error = err;
                     self.dirty = true;
@@ -395,7 +431,16 @@ pub const Ui = struct {
                 self.customizing = false;
             },
             // Only implemented owner adapters may enable/publish mutations.
-            .install, .update, .uninstall, .update_all => {},
+            .install => {
+                const item = self.row() orelse return;
+                if (!self.allowed(.install, item.*)) return;
+                const path = r.AbsoluteFilePath.parse(self.destination(item.*) orelse return) catch return;
+                self.install_requested = .{ .package_index = item.package_index orelse return, .destination = path };
+                self.detail = false;
+                self.customizing = false;
+                self.focus.index = 5;
+            },
+            .update, .uninstall, .update_all => {},
         }
         self.dirty = true;
     }

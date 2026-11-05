@@ -111,15 +111,17 @@ pub const Binding = struct {
     package_type: Kind,
     target: []const u8,
     installed_version: []const u8,
-    release_id: []const u8,
-    asset_id: []const u8,
+    release_id: ?[]const u8,
+    asset_id: ?[]const u8,
     sha256: []const u8,
     actual_path: []const u8,
     links: []const Link = &.{},
 
     pub fn validate(self: Binding) !void {
         if (!token(self.package_id) or !token(self.target) or !versions.validSemanticVersion(self.installed_version) or
-            !decimal(self.release_id) or !decimal(self.asset_id) or !hex(self.sha256, 64) or
+            (self.release_id != null and !decimal(self.release_id.?)) or
+            (self.asset_id != null and !decimal(self.asset_id.?)) or
+            ((self.release_id == null) != (self.asset_id == null)) or !hex(self.sha256, 64) or
             !pathText(self.actual_path)) return error.InvalidBinding;
         for (self.links) |link| if (!pathText(link.path) or !hex(link.sha256, 64)) return error.InvalidBinding;
     }

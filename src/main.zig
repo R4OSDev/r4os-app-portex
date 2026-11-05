@@ -2,15 +2,18 @@ const r = @import("r4os");
 const load = @import("load_job.zig");
 const ui = @import("ui.zig");
 const download = @import("download.zig");
+const installation = @import("installation.zig");
+const r4std = @import("r4std");
 
 pub fn r4_app_main(app: *r.App) i32 {
+    if (!r4std.init(app.startContext())) return r.abi.err_no_group;
     var timers: [0]r.Timer = .{};
     var window = r.Window.init(app.system(), app.desktop() orelse return -1, app.drawing() orelse return -1, &timers) orelse return -2;
     _ = window.setTitle("Portex");
     _ = window.setMinimumSize(680, 560);
     var snapshot: load.Snapshot = .{};
     defer snapshot.deinit();
-    var view = ui.Ui{ .window = &window, .allocator = app.system().allocator(), .snapshot = &snapshot, .style = r.gui.Style.light().withSystemFonts(&window.draw), .reload_requested = true };
+    var view = ui.Ui{ .window = &window, .allocator = app.system().allocator(), .snapshot = &snapshot, .style = r.gui.Style.light().withSystemFonts(&window.draw), .reload_requested = true, .capabilities = .{ .install = true } };
     defer view.deinit();
     const focus_client = r.desktop_actions.Client{ .sys = window.sys };
     switch (focus_client.focusSnapshot(.{ .window_id = @intCast(window.id) })) {
@@ -21,7 +24,8 @@ pub fn r4_app_main(app: *r.App) i32 {
     }
     var job = load.Job{ .app = app, .allocator = app.system().allocator() };
     var download_job: download.Job = undefined;
-    var downloading = false;
+    var install_job: installation.Job = undefined;
+    var mode: enum { load, download, install } = .load;
     var thread: ?r.app_resources.JoinHandle = null;
     const resources = app.resources();
     var closing = false;
@@ -30,8 +34,48 @@ pub fn r4_app_main(app: *r.App) i32 {
     while (true) {
         closing = closing or app.shouldClose();
         if (closing or view.cancel_requested) {
-            if (downloading) download_job.stop.request() else job.stop.request();
+            switch (mode) {
+                .download => download_job.stop.request(),
+                .load => job.stop.request(),
+                .install => {
+                    install_job.stop.request();
+                    if (install_job.download_job) |*dl| dl.stop.request();
+                },
+            }
             view.cancel_requested = false;
+        }
+        if (!closing and (view.install_requested != null or view.resume_requested) and thread == null) {
+            const request = view.install_requested;
+            const resuming = view.resume_requested;
+            view.install_requested = null;
+            view.resume_requested = false;
+            var created = false;
+            if (resuming) {
+                install_job = .{ .app = app, .allocator = app.system().allocator(), .resuming = true };
+                created = true;
+            } else if (request) |value| if (snapshot.result.snapshot) |*cached| if (cached.fresh and value.package_index < cached.catalog.packages.len) {
+                const package = cached.catalog.packages[value.package_index];
+                if (download.Plan.init(package, cached.origin, cached.profile)) |plan| {
+                    install_job = .{ .app = app, .allocator = app.system().allocator(), .destination = value.destination, .title = package.display_name, .adopt = value.adopt, .download_job = .{ .app = app, .allocator = app.system().allocator(), .plan = plan, .progress = .{ .total = plan.size } } };
+                    created = true;
+                } else |err| snapshot.failure = err;
+            };
+            if (created) {
+                view.installation_progress = &install_job.progress;
+                view.download_progress = if (install_job.download_job) |*dl| &dl.progress else null;
+                switch (resources.createThread(installation.Job.entry, @intFromPtr(&install_job), 512 * 1024)) {
+                    .handle => |handle| {
+                        thread = handle;
+                        mode = .install;
+                        view.busy = true;
+                    },
+                    .failure => {
+                        snapshot.failure = error.WorkerUnavailable;
+                        view.installation_progress = null;
+                    },
+                }
+            }
+            view.dirty = true;
         }
         if (!closing and view.download_requested != null and thread == null) {
             const index = view.download_requested.?;
@@ -42,10 +86,11 @@ pub fn r4_app_main(app: *r.App) i32 {
                     // Snapshot and all plan slices remain alive through join.
                     download_job = .{ .app = app, .allocator = app.system().allocator(), .plan = value, .progress = .{ .total = value.size } };
                     view.download_progress = &download_job.progress;
+                    view.installation_progress = null;
                     switch (resources.createThread(download.Job.entry, @intFromPtr(&download_job), 256 * 1024)) {
                         .handle => |handle| {
                             thread = handle;
-                            downloading = true;
+                            mode = .download;
                             view.busy = true;
                         },
                         .failure => {
@@ -61,11 +106,12 @@ pub fn r4_app_main(app: *r.App) i32 {
         }
         if (!closing and view.reload_requested and thread == null) {
             view.reload_requested = false;
-            view.download_progress = null;
+            if (view.installation_progress == null) view.download_progress = null;
             job = .{ .app = app, .allocator = app.system().allocator() };
             switch (resources.createThread(load.Job.entry, @intFromPtr(&job), 256 * 1024)) {
                 .handle => |handle| {
                     thread = handle;
+                    mode = .load;
                     view.busy = true;
                 },
                 .failure => {
@@ -77,13 +123,13 @@ pub fn r4_app_main(app: *r.App) i32 {
         }
         if (thread) |*worker| switch (worker.join(if (closing) period else r.time_contract.timeoutPoll())) {
             .exited => {
-                if (!downloading) {
+                if (mode == .load) {
                     view.replaced();
                     snapshot.deinit();
                     snapshot = job.output;
                     job.output = .{};
                 }
-                downloading = false;
+                if (mode == .install) view.reload_requested = true;
                 thread = null;
                 view.busy = false;
                 view.dirty = true;
@@ -95,7 +141,7 @@ pub fn r4_app_main(app: *r.App) i32 {
                 app.system().sleepTicks(@max(1, app.system().monotonicHz() / 10));
             },
         };
-        if (downloading) view.dirty = true;
+        if (thread != null and mode != .load) view.dirty = true;
         if (closing) {
             if (thread == null) break;
             continue;
