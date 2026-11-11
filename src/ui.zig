@@ -801,14 +801,20 @@ pub const Ui = struct {
                     if (std.meta.activeTag(value) == .search) {
                         self.focus.index = 2;
                         const canvas = self.layoutCanvas();
-                        self.search.cursor = canvas.textIndexAt(self.search.value(), message.x - self.searchRect(canvas).x - g.default_metrics.text_pad_x);
-                        self.search.clearSelection();
+                        var position = self.search.cursor;
+                        if (canvas.textIndexChecked(self.search.value(), message.x - self.searchRect(canvas).x - g.default_metrics.text_pad_x, &position) == 0) {
+                            self.search.cursor = position;
+                            self.search.clearSelection();
+                        }
                     }
                     if (std.meta.activeTag(value) == .path_field) {
                         const canvas = self.layoutCanvas();
                         const box = self.modal(canvas).contentRect();
-                        self.path_field.cursor = canvas.textIndexAt(self.path_field.value(), message.x - box.x - g.default_metrics.text_pad_x);
-                        self.path_field.clearSelection();
+                        var position = self.path_field.cursor;
+                        if (canvas.textIndexChecked(self.path_field.value(), message.x - box.x - g.default_metrics.text_pad_x, &position) == 0) {
+                            self.path_field.cursor = position;
+                            self.path_field.clearSelection();
+                        }
                     }
                     if (self.acquire()) {
                         self.pressed = value;

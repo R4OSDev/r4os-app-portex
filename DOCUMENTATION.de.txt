@@ -183,3 +183,31 @@ validierten Cache voraus. Fehler behalten die letzte Ansicht als veraltet;
 401 registration_required registriert höchstens einmal neu, 403 stoppt,
 429/503 wiederholen höchstens dreimal mit 250/500/1000 ms Verzögerung.
 Fehlender Katalog oder unavailable bedeutet niemals Deinstallation.
+
+API-Migration0.90.71
+-------------------
+Portex0.1.14 verwendet App2/Query2, R4STD.init2 und die gebundenen normalen
+Window-/Datei-/Web-/Service-/Threadfassaden. Texttreffer verwenden die ganze
+gepruefte Fontpraefixantwort und erhalten bei Fehler den bisherigen Cursor.
+Die vorhandenen Textfelder besitzen Clipboardediting und den expliziten
+Zielpfad samt originalem Dateinamen.
+
+Der Katalog teilt60s ueber Registrierung, Anfragen und Retrywartezeiten.
+Eine einzelne Registrierungs-/Fetchphase erhaelt hoechstens15s daraus.
+Jeder Download teilt ein einziges Clockbudget ueber Authentifizierung,
+alle Versuche/Backoffs, Bodyannahme und SHA-Pruefung. Sekunden120 plus
+aufgerundete16KB-Bloecke des ganzen Assets, hoechstens3600. Unsicherer
+Dateieffekt beendet den Versuch. Bekannte gepufferte Daten werden nach
+Transport-/Cancel-/Zeitfehler einmalig abgegeben. Fortschrittsraten verwenden
+validierte Nanosekunden.300s-Refresh und250ms-Progressintervalle pruefen
+ebenfalls die genaue Clockidentitaet und monotonen Fortschritt. Der
+Hauptthread haelt alle Workerleihen bis zur wirklichen Joinquittung.
+
+Die vorhandene Testsuite enthaelt den Gegenfall der wiederholten Frist.
+Am Original folgen vier Versuche und RetriesExhausted. Die neue Pruefung
+liefert TimedOut nach einem Versuch bei erhaltenem Drei-Byte-Praefix.
+Shared Stream-/Resolver-/Waitbesitzer werden vom normalen Webpfad genutzt.
+Erstzugang, Cache-/Registrierungsfehler, Datei-/Inventartransaktionen und
+regionale Szenen bleiben ihren bestehenden Fachbesitzern zugeordnet.
+Native Originale und finale Artefakte werden im Workspace unter
+Research/API-ABI/Migration/0.90.71 qualifiziert.

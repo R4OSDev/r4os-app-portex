@@ -102,7 +102,7 @@ fn saveIntent(files: *const r.Files, allocator: std.mem.Allocator, value: Intent
     try state.writeBytes(files, allocator, job_path, bytes, state.max_bytes);
 }
 pub const Job = struct {
-    app: *r.App,
+    app: *r.App2,
     allocator: std.mem.Allocator,
     download_job: ?download.Job = null,
     stop: r.app_contract.StopFlag = .{},
@@ -349,7 +349,7 @@ pub const Job = struct {
         self.progress.set(.installed);
     }
 };
-fn installed(app: *r.App, files: *const r.Files, allocator: std.mem.Allocator, intent: Intent) !bool {
+fn installed(app: *r.App2, files: *const r.Files, allocator: std.mem.Allocator, intent: Intent) !bool {
     const ctx = app.system();
     if ((try backend.asset.system.info(&ctx, intent.destination)) == null) return false;
     const observed = backend.asset.system.inspect(&ctx, intent.destination) catch return false;
@@ -414,7 +414,7 @@ pub fn componentKind(kind: m.Kind) r.r4u_manifest.ComponentKind {
 }
 /// Finish metadata only after the existing owner reports this exact batch
 /// installed. This never stages, commits, restarts or resumes a transaction.
-pub fn reconcile(app: *r.App, allocator: std.mem.Allocator) !void {
+pub fn reconcile(app: *r.App2, allocator: std.mem.Allocator) !void {
     const files = app.files() orelse return error.FilesUnavailable;
     const saved = (try readIntent(&files, allocator)) orelse return;
     defer saved.deinit();

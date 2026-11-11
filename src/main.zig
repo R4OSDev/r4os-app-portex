@@ -7,10 +7,10 @@ const updates = @import("update_queue.zig");
 const uninstall = @import("uninstall.zig");
 const r4std = @import("r4std");
 
-pub fn r4_app_main(app: *r.App) i32 {
-    if (!r4std.init(app.startContext())) return r.abi.err_no_group;
+pub fn r4_app_main(app: *r.App2) i32 {
+    if (!r4std.init2(app.startContext())) return r.abi.err_no_group;
     var timers: [0]r.Timer = .{};
-    var window = r.Window.init(app.system(), app.desktop() orelse return -1, app.drawing() orelse return -1, &timers) orelse return -2;
+    var window = app.window(&timers) orelse return -2;
     _ = window.setTitle("Portex");
     _ = window.setMinimumSize(680, 560);
     var snapshot: load.Snapshot = .{};
@@ -36,8 +36,9 @@ pub fn r4_app_main(app: *r.App) i32 {
     const resources = app.resources();
     var closing = false;
     var exit_code: i32 = 0;
-    var next_progress_paint: u64 = 0;
-    var next_refresh: u64 = 0;
+    const clock = app.clock() catch return -8;
+    var progress_paint: ?r.rpc_budget.Budget = null;
+    var refresh: ?r.rpc_budget.Budget = null;
     const period = r.time_contract.timeoutFinite(r.time_contract.durationFromNanoseconds(100_000_000));
     while (true) {
         closing = closing or app.shouldClose();
@@ -56,9 +57,16 @@ pub fn r4_app_main(app: *r.App) i32 {
         }
         // Search only while Portex is open. Defer refresh while an immutable
         // snapshot is borrowed or the user is interacting with a dialog.
-        if (!closing and thread == null and app.system().ticks() >= next_refresh and
-            !view.detail and !view.customizing and !view.showing_queue and !view.category_open and view.remove_requested == null and !view.remove_resume)
-            view.reload_requested = true;
+        if (!closing and thread == null and !view.detail and !view.customizing and
+            !view.showing_queue and !view.category_open and view.remove_requested == null and !view.remove_resume)
+        {
+            const expired = due(&refresh) catch {
+                closing = true;
+                exit_code = -8;
+                continue;
+            };
+            if (expired) view.reload_requested = true;
+        }
         if (!closing and thread == null and (view.remove_requested != null or view.remove_resume)) {
             const index = view.remove_requested;
             remove_job = .{ .app = app, .allocator = app.system().allocator(), .resuming = view.remove_resume, .cancel = view.remove_abort };
@@ -216,7 +224,7 @@ pub fn r4_app_main(app: *r.App) i32 {
                     snapshot.deinit();
                     snapshot = job.output;
                     job.output = .{};
-                    next_refresh = app.system().ticks() +| app.system().monotonicHz() * 300;
+                    refresh = r.rpc_budget.Budget.fromTimeout(clock.read, r.time_contract.timeoutFinite(.{ .nanoseconds = 300_000_000_000 })) catch return -8;
                 }
                 if (mode == .install or mode == .update or mode == .remove) view.reload_requested = true;
                 if (mode == .update) {
@@ -234,10 +242,20 @@ pub fn r4_app_main(app: *r.App) i32 {
                 app.system().sleepTicks(@max(1, app.system().monotonicHz() / 10));
             },
         };
-        const now = app.system().ticks();
-        if (thread != null and mode != .load and now >= next_progress_paint) {
-            view.refreshProgress();
-            next_progress_paint = now +| @max(1, app.system().monotonicHz() / 4);
+        if (!closing and thread != null and mode != .load) {
+            const expired = due(&progress_paint) catch {
+                closing = true;
+                exit_code = -8;
+                continue;
+            };
+            if (expired) {
+                view.refreshProgress();
+                progress_paint = r.rpc_budget.Budget.fromTimeout(clock.read, r.time_contract.timeoutFinite(.{ .nanoseconds = 250_000_000 })) catch {
+                    closing = true;
+                    exit_code = -8;
+                    continue;
+                };
+            }
         }
         if (closing) {
             if (thread == null) break;
@@ -270,6 +288,17 @@ pub fn r4_app_main(app: *r.App) i32 {
         }
     }
     return exit_code;
+}
+
+fn due(timer: *?r.rpc_budget.Budget) r.rpc_budget.Error!bool {
+    if (timer.*) |*budget| {
+        _ = budget.remainingTicks() catch |err| {
+            if (err == error.TimedOut) return true;
+            return err;
+        };
+        return false;
+    }
+    return true;
 }
 
 fn dispatch(view: *ui.Ui, message: r.app_gui.Message) bool {

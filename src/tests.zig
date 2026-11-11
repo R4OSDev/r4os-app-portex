@@ -190,25 +190,44 @@ const DownloadDriverFixture = struct {
     delays: usize = 0,
     stopped: bool = false,
     shortened: bool = false,
+    elapsed_ms: u64 = 0,
+    deadline_ms: ?u64 = null,
+    pub fn check(self: *@This()) !void {
+        if (self.deadline_ms) |deadline| if (self.elapsed_ms >= deadline) return error.TimedOut;
+    }
     pub fn cancelled(self: *@This()) bool {
         return self.stopped;
     }
     pub fn authenticate(self: *@This(), _: bool) !void {
         self.registrations += 1;
     }
-    pub fn delay(self: *@This(), _: u32) void {
+    pub fn delay(self: *@This(), milliseconds: u32) void {
         self.delays += 1;
+        self.elapsed_ms += milliseconds;
     }
     pub fn request(self: *@This(), store: *DownloadStoreFixture, _: download.Plan, offset: u64) download.Attempt {
         self.offsets[self.calls] = offset;
         const attempt = self.attempts[self.calls];
         self.calls += 1;
+        self.elapsed_ms += 90;
         const amount: usize = if (attempt == .complete) (if (self.shortened) 11 else 12) else if (attempt == .failure and download.retryable(attempt.failure)) @min(12, store.length + 3) else store.length;
         @memcpy(store.bytes[store.length..amount], "Hello World!"[store.length..amount]);
         store.length = amount;
         return attempt;
     }
 };
+test "migration whole download deadline includes retry backoff and retains known partial" {
+    const plan = try download.Plan.init(package(), "https://138.201.253.143:4022", "public");
+    var store: DownloadStoreFixture = .{};
+    var progress: download.Progress = .{ .total = plan.size };
+    var driver = DownloadDriverFixture{
+        .attempts = &.{ .{ .failure = .read_peer_closed }, .{ .failure = .read_peer_closed }, .{ .failure = .read_peer_closed }, .{ .failure = .read_peer_closed } },
+        .deadline_ms = 100,
+    };
+    try std.testing.expectError(error.TimedOut, download.receive(&driver, &store, plan, &progress));
+    try std.testing.expectEqual(@as(usize, 1), driver.calls);
+    try std.testing.expectEqual(@as(usize, 3), store.length);
+}
 test "download transaction resumes, restarts, reconciles ranges and bounds failure and cancellation" {
     const plan = try download.Plan.init(package(), "https://138.201.253.143:4022", "public");
     var progress = download.Progress{ .total = 12 };

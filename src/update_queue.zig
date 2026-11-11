@@ -178,7 +178,7 @@ fn lease(ctx: *const r.r4sys.Context) !void {
     }
 }
 /// Only reconcile a completed own receipt. No download, stage, commit or reboot.
-pub fn reconcile(app: *r.App, allocator: std.mem.Allocator) !void {
+pub fn reconcile(app: *r.App2, allocator: std.mem.Allocator) !void {
     const files = app.files() orelse return error.FilesUnavailable;
     const ctx = app.system();
     lease(&ctx) catch |err| { if (err == error.UpdateQueueBusy) return; return err; };
@@ -200,7 +200,7 @@ pub fn reconcile(app: *r.App, allocator: std.mem.Allocator) !void {
 }
 
 pub const Job = struct {
-    app: *r.App,
+    app: *r.App2,
     allocator: std.mem.Allocator,
     selection: ?[]const Selection = null,
     activate: bool = false,

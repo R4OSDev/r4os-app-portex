@@ -97,7 +97,7 @@ pub fn retrieve(transport: anytype, allocator: Allocator, old: ?cache.Snapshot) 
 /// Shared per-request server session for catalog and original-asset reads.
 /// No credential material leaves R4SRV. Buffers belong to the joined worker.
 pub const Native = struct {
-    app: *r4os.App,
+    app: *r4os.App2,
     stop: *r4os.app_contract.StopFlag,
     target: r4os.server_targets.Target,
     profile: r4os.server_profile.Profile,
@@ -106,6 +106,7 @@ pub const Native = struct {
     url: [128]u8 = undefined,
     url_len: usize = 0,
     generation: u32 = 0,
+    budget: r4os.rpc_budget.Budget,
     raw: []u8,
     body: []u8,
     scratch: []u8,
@@ -120,14 +121,22 @@ pub const Native = struct {
         return self.stop.requested();
     }
 
+    pub fn remaining(self: *Native, maximum_ns: u64) r4os.rpc_budget.Error!r4os.time_contract.Timeout {
+        var timeout = try r4os.rpc_budget.remainingTimeout(&self.budget);
+        timeout.nanoseconds = @min(timeout.nanoseconds, maximum_ns);
+        return timeout;
+    }
+
     pub fn authenticate(self: *Native, retry: bool) ?Failure {
         if (self.cancelled()) return .{ .reason = .cancelled };
+        const timeout = self.remaining(15_000_000_000) catch |err| return .{ .reason = .transport, .cause = err };
         const services = self.app.services() orelse return .{ .reason = .registration_unavailable };
         const client = r4os.server_access.Client{ .services = services };
-        const response = switch (if (retry) client.retryAfterRegistrationRequired(.app_center, self.generation) else client.ensure(.app_center)) {
+        const response = switch (client.ensureBounded(.app_center, if (retry) self.generation else null, timeout)) {
             .response => |r| r,
             else => return .{ .reason = .registration_unavailable },
         };
+        if (response.reserved2 != 0 or response.attempted > 1) return .{ .reason = .registration_response };
         if (response.code != @intFromEnum(r4os.server_access.Code.ok)) return .{
             .reason = switch (response.code) {
                 @intFromEnum(r4os.server_access.Code.credentials) => .registration_credentials,
@@ -147,12 +156,13 @@ pub const Native = struct {
     }
 
     pub fn fetch(self: *Native, etag: ?[]const u8) Fetch {
+        const timeout = self.remaining(15_000_000_000) catch |err| return .{ .failure = .{ .reason = .transport, .cause = err } };
         var web = self.app.web() orelse return .{ .failure = .{ .reason = .unavailable_web } };
         var conditional: [300]u8 = undefined;
         const header = if (etag) |tag| std.fmt.bufPrint(&conditional, "if-none-match:{s}\n", .{tag}) catch
             return .{ .failure = .{ .reason = .invalid_cache } } else "";
         return switch (web.fetch(self.url[0..self.url_len], self.raw, self.body, self.scratch, .{
-            .timeout = r4os.time_contract.timeoutFinite(r4os.time_contract.durationFromNanoseconds(15_000_000_000)),
+            .timeout = timeout,
             .redirect = .error_mode,
             .redirect_limit = 0,
             .stop = &self.stop.storage,
@@ -169,7 +179,9 @@ pub const Native = struct {
         var left = milliseconds;
         while (left > 0 and !self.cancelled()) {
             const slice = @min(left, 50);
-            sys.sleepTicks(@max(1, sys.monotonicHz() * slice / 1000));
+            const timeout = self.remaining(@as(u64, slice) * 1_000_000) catch return;
+            const ticks = sys.timeoutTicks(timeout) catch return;
+            sys.sleepTicks(ticks);
             left -= slice;
         }
     }
@@ -195,7 +207,7 @@ pub fn cacheDirectory(files: *const r4os.Files) !void {
     }
 }
 
-pub fn refresh(app: *r4os.App, allocator: Allocator, stop: *r4os.app_contract.StopFlag) Result {
+pub fn refresh(app: *r4os.App2, allocator: Allocator, stop: *r4os.app_contract.StopFlag) Result {
     return refreshImpl(app, allocator, stop) catch |err| .{ .failure = .{ .reason = .configuration, .cause = err } };
 }
 
@@ -234,7 +246,7 @@ pub fn describe(result: *const Result, output: []u8) [:0]const u8 {
     return "Kein Katalog verfuegbar";
 }
 
-fn refreshImpl(app: *r4os.App, allocator: Allocator, stop: *r4os.app_contract.StopFlag) !Result {
+fn refreshImpl(app: *r4os.App2, allocator: Allocator, stop: *r4os.app_contract.StopFlag) !Result {
     const files = app.files() orelse return error.FilesUnavailable;
     const raw = try allocator.alloc(u8, cache.max_catalog_bytes + r4os.http.max_header_bytes);
     defer allocator.free(raw);
@@ -242,7 +254,7 @@ fn refreshImpl(app: *r4os.App, allocator: Allocator, stop: *r4os.app_contract.St
     defer allocator.free(body);
     const scratch = try allocator.alloc(u8, r4os.app_web.tls_scratch_bytes);
     defer allocator.free(scratch);
-    var native = try open(app, stop, raw, body, scratch);
+    var native = try open(app, stop, raw, body, scratch, r4os.time_contract.timeoutFinite(.{ .nanoseconds = 60_000_000_000 }));
     const origin = native.origin();
     var cache_error: ?anyerror = null;
     const previous = cache.Snapshot.load(&files, allocator, origin, native.profileName()) catch |err| bad_cache: {
@@ -251,6 +263,13 @@ fn refreshImpl(app: *r4os.App, allocator: Allocator, stop: *r4os.app_contract.St
     };
     var result = try retrieve(&native, allocator, previous);
     result.cache_error = cache_error;
+    if (result.failure == null) {
+        _ = native.remaining(std.math.maxInt(u64)) catch |err| {
+            if (result.snapshot) |*snapshot| snapshot.fresh = false;
+            result.failure = .{ .reason = .transport, .cause = err };
+            return result;
+        };
+    }
     if (result.snapshot) |*snapshot| if (snapshot.fresh and !snapshot.cached) {
         cacheDirectory(&files) catch |err| {
             result.cache_error = err;
@@ -265,13 +284,41 @@ fn refreshImpl(app: *r4os.App, allocator: Allocator, stop: *r4os.app_contract.St
     return result;
 }
 
-pub fn open(app: *r4os.App, stop: *r4os.app_contract.StopFlag, raw: []u8, body: []u8, scratch: []u8) !Native {
+pub fn open(app: *r4os.App2, stop: *r4os.app_contract.StopFlag, raw: []u8, body: []u8, scratch: []u8, timeout: r4os.time_contract.Timeout) !Native {
     const sys = app.system();
     const target = try r4os.server_targets.read(&sys, .app_center);
     const profile = try r4os.server_profile.load(&sys);
-    var native = Native{ .app = app, .stop = stop, .target = target, .profile = profile, .raw = raw, .body = body, .scratch = scratch };
+    const clock = try app.clock();
+    var native = Native{ .app = app, .stop = stop, .target = target, .profile = profile, .raw = raw, .body = body, .scratch = scratch, .budget = try r4os.rpc_budget.Budget.fromTimeout(clock.read, timeout) };
     const origin = try std.fmt.bufPrint(&native.origin_text, "https://{s}:{d}", .{ target.host(), target.port });
     native.origin_len = origin.len;
     native.url_len = (try std.fmt.bufPrint(&native.url, "{s}/api/v1/packages", .{origin})).len;
     return native;
+}
+
+test "migration catalog native phases keep one deadline and reject a changed clock" {
+    const Clock = struct {
+        var now: u64 = 1_000_000_000;
+        var generation: u32 = 7;
+        fn read(out: *r4os.abi.MonotonicClockInfo) callconv(.c) i32 {
+            out.* = .{ .flags = r4os.abi.monotonic_clock_flag_valid, .source = 1, .generation = generation, .instant_ns = now, .resolution_ns = 1, .event_requested_hz = 1000 };
+            return 1;
+        }
+    };
+    Clock.now = 1_000_000_000;
+    Clock.generation = 7;
+    var native: Native = undefined;
+    native.budget = try r4os.rpc_budget.Budget.fromTimeout(Clock.read, r4os.time_contract.timeoutFinite(.{ .nanoseconds = 600_000_000 }));
+    const deadline = native.budget.deadline.deadline_ns;
+    try std.testing.expectEqual(@as(u64, 200_000_000), (try native.remaining(200_000_000)).nanoseconds);
+    Clock.now += 350_000_000;
+    try std.testing.expectEqual(@as(u64, 250_000_000), (try native.remaining(1_000_000_000)).nanoseconds);
+    try std.testing.expectEqual(deadline, native.budget.deadline.deadline_ns);
+    const before = native.budget;
+    Clock.generation += 1;
+    try std.testing.expectError(error.ClockChanged, native.remaining(1_000_000_000));
+    try std.testing.expect(std.meta.eql(before, native.budget));
+    Clock.generation = 7;
+    Clock.now = deadline;
+    try std.testing.expectError(error.TimedOut, native.remaining(1_000_000_000));
 }

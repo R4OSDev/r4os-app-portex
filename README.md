@@ -52,3 +52,27 @@ rendering uses the public SDK controls and optional manifest title colors;
 the Desktop draws the outer frame. Current system fonts remain bitmap fonts.
 
 Original R4OS code is licensed under Apache-2.0. See `LICENSE` and `NOTICE`.
+
+App2 migration in 0.1.14
+-----------------------
+The normal entry uses App2, Query2 and the joined worker/resource owners.
+R4STD settings bind the actual generation2 start context. Search and path
+hit tests use checked complete font-prefix metrics and preserve the caret
+when the provider rejects a measurement. The existing text controls own
+clipboard editing and the explicit destination keeps its original filename.
+
+Catalog authentication, requests and retry backoff share a finite60-second
+clock-bound budget. Each registration/request phase is bounded to15seconds.
+One download budget covers registration, all retries/backoff, body callbacks
+and SHA-256 readback. Its duration in seconds is120 plus the number of
+16-KB blocks in the complete asset, capped at3600. A failed filesystem write
+ends the attempt with its recorded prefix. Accepted buffered data is drained
+once after a transport/cancellation/time failure. Progress rates use the
+validated nanosecond clock. The five-minute refresh and quarter-second
+progress schedule also validate clock identity and monotonicity.
+
+First registration, trusted HTTPS, conditional catalog cache, status messages,
+original-asset installation and restart queues use the existing shared owners.
+The regional full-scene replacement policy and bounded input dispatch are
+qualified through the normal GUI entry. Runtime evidence and host/platform
+scope are recorded in the workspace migration receipt for0.90.71.

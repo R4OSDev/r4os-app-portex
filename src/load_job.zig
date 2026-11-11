@@ -29,7 +29,7 @@ pub const Snapshot = struct {
     }
 };
 pub const Job = struct {
-    app: *r.App,
+    app: *r.App2,
     allocator: std.mem.Allocator,
     stop: r.app_contract.StopFlag = .{},
     output: Snapshot = .{},
@@ -110,7 +110,7 @@ pub const Job = struct {
 
 /// The inventory and saved bindings suggest locations; only the actual
 /// bounded R4M0 metadata (and owned hash) qualifies an installed app.
-pub fn verifyObserved(app: *r.App, files: *const r.Files, allocator: std.mem.Allocator, projection: *view.Projection, bindings: m.Bindings) !void {
+pub fn verifyObserved(app: *r.App2, files: *const r.Files, allocator: std.mem.Allocator, projection: *view.Projection, bindings: m.Bindings) !void {
     const ctx = app.system();
     const scratch = try allocator.alloc(u8, 64 * 1024);
     defer allocator.free(scratch);

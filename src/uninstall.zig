@@ -64,7 +64,7 @@ pub const Progress = struct {
     }
 };
 pub const Job = struct {
-    app: *r.App,
+    app: *r.App2,
     allocator: std.mem.Allocator,
     target: ?[]const u8 = null,
     name: []const u8 = "",

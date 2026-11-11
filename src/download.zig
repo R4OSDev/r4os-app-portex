@@ -158,12 +158,16 @@ pub fn receive(driver: anytype, store: anytype, plan: Plan, progress: *Progress)
     var registered = false;
     var reset = false;
     while (true) {
+        try driver.check();
         if (driver.cancelled()) return error.Cancelled;
         const offset = try store.size();
         progress.done.store(offset, .release);
         if (offset == plan.size) {
             progress.set(.verifying);
-            if (try store.verify()) return;
+            if (try store.verify()) {
+                try driver.check();
+                return;
+            }
             return error.HashMismatch;
         }
         if (offset > plan.size) return error.PartialSizeInvalid;
@@ -174,17 +178,22 @@ pub fn receive(driver: anytype, store: anytype, plan: Plan, progress: *Progress)
                 if (try store.size() != plan.size) return error.LengthMismatch;
                 progress.set(.verifying);
                 if (!try store.verify()) return error.HashMismatch;
+                try driver.check();
                 return;
             },
             .restart, .range_end => {
                 if (response == .range_end and response.range_end != plan.size) return error.RangeMismatch;
                 if (try store.size() == plan.size) {
                     progress.set(.verifying);
-                    if (try store.verify()) return;
+                    if (try store.verify()) {
+                        try driver.check();
+                        return;
+                    }
                     return error.HashMismatch;
                 }
                 if (reset) return error.RangeRestartRepeated;
                 reset = true;
+                try driver.check();
                 try store.reset();
                 progress.done.store(0, .release);
                 continue;
@@ -224,7 +233,7 @@ pub const Result = struct {
     log_service_code: i32 = 0,
 };
 pub const Job = struct {
-    app: *r.App,
+    app: *r.App2,
     allocator: Allocator,
     plan: Plan,
     stop: r.app_contract.StopFlag = .{},
@@ -271,7 +280,16 @@ pub const Job = struct {
         defer _ = sys.fileStreamAbort(lock_path);
         if (sys.fileStreamFinish(lock_path, 0, r.r4sys.file_stream_finish_keep_ownership) != 0) return error.DownloadLock;
         const stop = self.external_stop orelse &self.stop;
-        var store = try Store.open(files, self.allocator, self.plan, stop, &self.progress);
+        const scratch = try self.allocator.alloc(u8, r.app_web.tls_scratch_bytes);
+        defer self.allocator.free(scratch);
+        const raw = try self.allocator.alloc(u8, r.http.max_header_bytes);
+        defer self.allocator.free(raw);
+        const io = try self.allocator.alloc(u8, 64 * 1024);
+        defer self.allocator.free(io);
+        const seconds: u64 = @min(@as(u64, 3600), 120 + (self.plan.size + 16383) / 16384);
+        var session = try catalog.open(self.app, stop, raw, &.{}, scratch, r.time_contract.timeoutFinite(.{ .nanoseconds = seconds * 1_000_000_000 }));
+        if (!std.mem.eql(u8, session.origin(), self.plan.origin) or !std.mem.eql(u8, session.profileName(), self.plan.profile)) return error.ServerTargetChanged;
+        var store = try Store.open(files, self.allocator, self.plan, stop, &self.progress, &session.budget);
         defer store.deinit();
         defer self.saveLog(&files, &store) catch |err| {
             self.result.log_error = err;
@@ -283,14 +301,6 @@ pub const Job = struct {
             self.progress.failure(err);
             self.progress.set(if (err == error.Cancelled) .cancelled else .failed);
         }
-        const scratch = try self.allocator.alloc(u8, r.app_web.tls_scratch_bytes);
-        defer self.allocator.free(scratch);
-        const raw = try self.allocator.alloc(u8, r.http.max_header_bytes);
-        defer self.allocator.free(raw);
-        const io = try self.allocator.alloc(u8, 64 * 1024);
-        defer self.allocator.free(io);
-        var session = try catalog.open(self.app, stop, raw, &.{}, scratch);
-        if (!std.mem.eql(u8, session.origin(), self.plan.origin) or !std.mem.eql(u8, session.profileName(), self.plan.profile)) return error.ServerTargetChanged;
         var driver = Driver{ .session = &session, .io = io, .progress = &self.progress };
         try driver.authenticate(false);
         try receive(&driver, &store, self.plan, &self.progress);
@@ -365,9 +375,10 @@ const Store = struct {
     log: r.AbsoluteFilePath,
     stop: *r.app_contract.StopFlag,
     progress: *Progress,
+    budget: *r.rpc_budget.Budget,
     buffered: @import("download_buffer.zig").Buffer,
 
-    fn open(files: r.Files, allocator: Allocator, plan: Plan, stop: *r.app_contract.StopFlag, progress: *Progress) !Store {
+    fn open(files: r.Files, allocator: Allocator, plan: Plan, stop: *r.app_contract.StopFlag, progress: *Progress, budget: *r.rpc_budget.Budget) !Store {
         const metadata = try plan.encode(allocator);
         defer allocator.free(metadata);
         var digest: [32]u8 = undefined;
@@ -394,7 +405,7 @@ const Store = struct {
         }
         const memory = try allocator.alloc(u8, 64 * 1024);
         errdefer allocator.free(memory);
-        var store = Store{ .files = files, .allocator = allocator, .plan = plan, .part = part, .log = log, .stop = stop, .progress = progress, .buffered = .{ .memory = memory, .committed = 0 } };
+        var store = Store{ .files = files, .allocator = allocator, .plan = plan, .part = part, .log = log, .stop = stop, .progress = progress, .budget = budget, .buffered = .{ .memory = memory, .committed = 0 } };
         if (files.info(part.asZ()) == .missing) try store.reset();
         store.buffered.committed = try store.size();
         return store;
@@ -439,6 +450,7 @@ const Store = struct {
         var offset: u64 = 0;
         while (offset < self.plan.size) {
             if (self.stop.requested()) return error.Cancelled;
+            _ = try r.rpc_budget.remainingTimeout(self.budget);
             const output = buffer[0..@intCast(@min(buffer.len, self.plan.size - offset))];
             const count = switch (self.files.readAt(self.part.asZ(), @intCast(offset), output)) {
                 .bytes => |n| n,
@@ -449,6 +461,7 @@ const Store = struct {
             offset += count;
         }
         const actual = std.fmt.bytesToHex(sha.finalResult(), .lower);
+        _ = try r.rpc_budget.remainingTimeout(self.budget);
         return std.ascii.eqlIgnoreCase(&actual, self.plan.sha256) and try self.size() == self.plan.size;
     }
 };
@@ -459,12 +472,16 @@ const Driver = struct {
     progress: *Progress,
     decision: ?Head = null,
     invalid: ?anyerror = null,
+    write_failed: bool = false,
     status: u16 = 0,
     plan: Plan = undefined,
     store: *Store = undefined,
-    started: u64 = 0,
+    started_ns: u64 = 0,
     started_bytes: u64 = 0,
 
+    fn check(self: *Driver) !void {
+        _ = try self.session.remaining(std.math.maxInt(u64));
+    }
     fn cancelled(self: *Driver) bool {
         return self.session.cancelled();
     }
@@ -502,14 +519,18 @@ const Driver = struct {
     }
     fn write(raw: ?*anyopaque, offset: u64, bytes: []const u8) bool {
         const self: *Driver = @ptrCast(@alignCast(raw.?));
-        self.store.append(offset, bytes) catch |err| {
+        self.check() catch |err| {
             self.invalid = err;
             return false;
         };
+        self.store.append(offset, bytes) catch |err| {
+            self.invalid = err;
+            self.write_failed = err != error.Cancelled;
+            return false;
+        };
         self.progress.set(.downloading);
-        const sys = self.session.app.system();
-        const elapsed = sys.ticks() -| self.started;
-        if (elapsed != 0) self.progress.rate.store(@intCast(@min(std.math.maxInt(u64), @as(u128, offset + bytes.len - self.started_bytes) * sys.monotonicHz() / elapsed)), .release);
+        const elapsed = self.session.budget.deadline.last_ns - self.started_ns;
+        if (elapsed != 0) self.progress.rate.store(@intCast(@min(std.math.maxInt(u64), @as(u128, offset + bytes.len - self.started_bytes) * 1_000_000_000 / elapsed)), .release);
         return !self.cancelled();
     }
     fn request(self: *Driver, store: *Store, plan: Plan, offset: u64) Attempt {
@@ -517,8 +538,10 @@ const Driver = struct {
         self.store = store;
         self.decision = null;
         self.invalid = null;
+        self.write_failed = false;
         self.status = 0;
-        self.started = self.session.app.system().ticks();
+        const timeout = self.session.remaining(std.math.maxInt(u64)) catch |err| return .{ .invalid = err };
+        self.started_ns = self.session.budget.deadline.last_ns;
         self.started_bytes = offset;
         self.progress.rate.store(0, .release);
         var url: [1024]u8 = undefined;
@@ -533,13 +556,9 @@ const Driver = struct {
             .max_retries = 0,
             .redirect_limit = 0,
             .stop = &self.session.stop.storage,
-            // This is the whole HTTP exchange deadline, not an idle timeout.
-            // Large original kernel assets must not be cut off after two
-            // minutes of continuous progress. Keep every attempt finite;
-            // cancellation and the existing three-retry policy still apply.
-            .timeout = r.time_contract.timeoutFinite(r.time_contract.durationFromNanoseconds(
-                @as(u64, @min(@as(u64, 3600), 120 + (plan.size - offset + 16383) / 16384)) * 1_000_000_000,
-            )),
+            // Registration, retries, backoff, body and verification share
+            // the asset-sized deadline created by the joined worker.
+            .timeout = timeout,
             .head_observer = observe,
             .head_context = self,
             .target_authorizer = allow,
@@ -547,7 +566,7 @@ const Driver = struct {
         });
         // Keep the accepted tail after transport failure or cancellation.
         // A filesystem/offset failure is ambiguous and must not append twice.
-        if (self.invalid == null or self.invalid.? == error.Cancelled) {
+        if (!self.write_failed) {
             store.buffered.finish(store) catch |err| {
                 self.invalid = err;
             };
