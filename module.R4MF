@@ -14,6 +14,7 @@ IMPORT=R4DESK:Query2:2
 IMPORT=R4DRAW:Query2:2
 IMPORT=R4NET:Query2:2
 IMPORT=R4DEV:Query2:2
+IMPORT=R4STD:Query2:2
 IMPORT=R4STD:SETTINGS_V1:1
 ZIG_MODULE=system_update_engine:../../SDK/r4os/system_update_engine.zig
 ZIG_MODULE=r4std:../../Libraries/R4STD/Bindings/Zig/r4std.zig
