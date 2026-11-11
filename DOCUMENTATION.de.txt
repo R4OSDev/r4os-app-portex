@@ -211,3 +211,8 @@ Erstzugang, Cache-/Registrierungsfehler, Datei-/Inventartransaktionen und
 regionale Szenen bleiben ihren bestehenden Fachbesitzern zugeordnet.
 Native Originale und finale Artefakte werden im Workspace unter
 Research/API-ABI/Migration/0.90.71 qualifiziert.
+
+Downloadordner und allgemeine Zustandsleser verwenden FileMetadata2 direkt.
+Damit funktionieren auch die bestehenden64-stelligen SHA256-Verzeichnisnamen
+und lange Dateinamen. Groessen werden nur bei gesetztem Bytegroessenflag
+verwendet. Der technische R4STD-Query2-Import ist ausdruecklich deklariert.

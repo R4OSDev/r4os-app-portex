@@ -76,3 +76,8 @@ original-asset installation and restart queues use the existing shared owners.
 The regional full-scene replacement policy and bounded input dispatch are
 qualified through the normal GUI entry. Runtime evidence and host/platform
 scope are recorded in the workspace migration receipt for0.90.71.
+
+Download directories and generic state reads use wide FileMetadata2 records,
+including existing64-character SHA-256 directory names and long filenames.
+Size-dependent reads require the byte-size-valid flag. The manifest declares
+the technical R4STD Query2 import used by the actual App2 runtime.

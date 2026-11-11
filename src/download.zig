@@ -270,9 +270,9 @@ pub const Job = struct {
         const files = self.app.files() orelse return error.FilesUnavailable;
         try catalog.cacheDirectory(&files);
         const directory = try r.AbsoluteFilePath.parse(root);
-        switch (files.info(directory.asZ())) {
+        switch (files.metadata(directory.asZ())) {
             .missing => if (files.createDirectory(directory.asZ()) != .ok) return error.DownloadDirectory,
-            .value => |info| if (info.is_dir == 0) return error.DownloadDirectory,
+            .found => |info| if (info.flags & r.abi.file_metadata2_flag_directory == 0) return error.DownloadDirectory,
             .failure => return error.DownloadDirectory,
         }
         const sys = self.app.system();
@@ -386,9 +386,9 @@ const Store = struct {
         const key = std.fmt.bytesToHex(digest, .lower);
         var name: [256]u8 = undefined;
         const directory = try r.AbsoluteFilePath.parse(try std.fmt.bufPrint(&name, "{s}\\{s}", .{ root, key }));
-        switch (files.info(directory.asZ())) {
+        switch (files.metadata(directory.asZ())) {
             .missing => if (files.createDirectory(directory.asZ()) != .ok) return error.DownloadDirectory,
-            .value => |info| if (info.is_dir == 0) return error.DownloadDirectory,
+            .found => |info| if (info.flags & r.abi.file_metadata2_flag_directory == 0) return error.DownloadDirectory,
             .failure => return error.DownloadDirectory,
         }
         // Atomic stage/backup leaves retain the native short-name contract.

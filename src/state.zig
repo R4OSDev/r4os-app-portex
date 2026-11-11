@@ -25,13 +25,14 @@ pub fn load(files: anytype, allocator: std.mem.Allocator, path: []const u8) !std
 
 pub fn readBytes(files: anytype, allocator: std.mem.Allocator, path: []const u8, limit: usize) !?[]u8 {
     const parsed_path = try r4os.AbsoluteFilePath.parse(path);
-    const info = switch (files.info(parsed_path.asZ())) {
-        .value => |v| v,
+    const info = switch (files.metadata(parsed_path.asZ())) {
+        .found => |v| v,
         .missing => return null,
         .failure => return error.BindingRead,
     };
-    if (info.is_dir != 0 or info.size == 0 or info.size > limit) return error.BindingSize;
-    const bytes = try allocator.alloc(u8, @intCast(info.size));
+    const size = r4os.metadata2.fileSize(&info) orelse return error.BindingSize;
+    if (info.flags & r4os.abi.file_metadata2_flag_directory != 0 or size == 0 or size > limit) return error.BindingSize;
+    const bytes = try allocator.alloc(u8, @intCast(size));
     errdefer allocator.free(bytes);
     const count = switch (files.read(parsed_path.asZ(), bytes)) {
         .bytes => |n| n,

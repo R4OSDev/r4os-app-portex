@@ -445,9 +445,12 @@ const Disk = struct {
         if (std.mem.endsWith(u8, path.bytes(), ".TXN")) return self.intent[0..self.intent_len];
         return self.current[0..self.current_len];
     }
-    pub fn info(self: *Disk, path: anytype) union(enum) { value: struct { size: u64, is_dir: u8 = 0 }, missing, failure: i32 } {
+    pub fn metadata(self: *Disk, path: anytype) @import("r4os").metadata2.InfoResult {
         const n = self.slice(path).len;
-        return if (n == 0) .missing else .{ .value = .{ .size = n } };
+        return if (n == 0) .missing else .{ .found = .{
+            .byte_size = n,
+            .flags = @import("r4os").abi.file_metadata2_flag_byte_size_valid,
+        } };
     }
     pub fn read(self: *Disk, path: anytype, out: []u8) union(enum) { bytes: u32, end, failure: i32 } {
         const bytes = self.slice(path);
