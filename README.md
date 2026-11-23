@@ -47,9 +47,12 @@ replacement frames with client damage; layout changes draw the full client.
 Queued input is dispatched in order, with a bound and a layout rebuild before
 hit-testing a changed view. Workers retain cancellation and actual join ownership.
 
-The accepted visual reference is preserved in `Design/Prisma.html`. Native
-rendering uses the public SDK controls and optional manifest title colors;
-the Desktop draws the outer frame. Current system fonts remain bitmap fonts.
+The current catalog and package-detail design is in `Design/Katalog.html`.
+Portex loads its bundled Inter and IBM Plex Mono faces once per instance. SDK
+controls use the same advances for painting, clipping, hit testing and caret
+placement. The resident font covers unavailable runs. The Desktop owns the
+outer frame and uses the title colors from the manifest. Font provenance and
+licenses are listed in `THIRD_PARTY_NOTICES.md`.
 
 Original R4OS code is licensed under Apache-2.0. See `LICENSE` and `NOTICE`.
 

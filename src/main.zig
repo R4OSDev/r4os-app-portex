@@ -15,7 +15,9 @@ pub fn r4_app_main(app: *r.App2) i32 {
     _ = window.setMinimumSize(680, 560);
     var snapshot: load.Snapshot = .{};
     defer snapshot.deinit();
-    var view = ui.Ui{ .window = &window, .allocator = app.system().allocator(), .snapshot = &snapshot, .style = r.gui.Style.light().withSystemFonts(&window.draw), .reload_requested = true, .capabilities = .{ .install = true, .update = true, .update_all = true, .uninstall = true } };
+    var text = @import("typography.zig").Text.init(app, app.system().allocator());
+    defer text.deinit();
+    var view = ui.Ui{ .text = &text, .window = &window, .allocator = app.system().allocator(), .snapshot = &snapshot, .style = @import("typography.zig").theme().withSystemFonts(&window.draw), .reload_requested = true, .capabilities = .{ .install = true, .update = true, .update_all = true, .uninstall = true } };
     defer view.deinit();
     const focus_client = r.desktop_actions.Client{ .sys = window.sys };
     switch (focus_client.focusSnapshot(.{ .window_id = @intCast(window.id) })) {

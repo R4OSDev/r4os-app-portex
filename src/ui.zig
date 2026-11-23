@@ -32,6 +32,7 @@ pub const Ui = struct {
     allocator: std.mem.Allocator,
     snapshot: *const load.Snapshot,
     style: g.Style,
+    text: *@import("typography.zig").Text,
     tab: v.Tab = .discover,
     kind: m.Kind = .application,
     search: g.TextField(256) = .{},
@@ -341,12 +342,12 @@ pub const Ui = struct {
         var commands: [256]r.abi.GuiFrameCommand = undefined;
         var resources: [32768]u8 = undefined;
         var builder: r.app_gui.FrameCanvas = undefined;
-        const canvas = painting.bufferedCanvas(&builder, &commands, &resources).withStyle(self.style);
+        const canvas = self.text.bind(painting.bufferedCanvas(&builder, &commands, &resources).withStyle(self.style));
         self.painted_width = canvas.w;
         self.painted_height = canvas.h;
         self.hit_count = 0;
         if (canvas.clear(self.style.background) < 0) return false;
-        if (!self.label(canvas.withTextRole(.heading), .{ .x = 24, .y = 14, .w = 230, .h = 38 }, "Portex", self.style.text, self.style.background)) return false;
+        if (!self.label(canvas.withTextRole(.display), .{ .x = 24, .y = 14, .w = 230, .h = 38 }, "Portex", self.style.text, self.style.background)) return false;
         if (!self.button(canvas, if (self.busy) .cancel else .refresh, .{ .x = canvas.w - 190, .y = 18, .w = 166, .h = 34 }, if (self.busy) "Abbrechen" else "Neu laden", true, false, self.focus.index == 5)) return false;
         if ((self.snapshot.pending_installation or self.pendingUpdates() or self.pendingRemoval()) and !self.busy and !self.button(canvas, .resume_install, .{ .x = canvas.w - 428, .y = 18, .w = 226, .h = 34 }, if (self.restartReady()) "Neustart starten" else "Wiederaufnehmen", true, true, false)) return false;
         var scratch: [1024]u8 = undefined;
@@ -477,7 +478,7 @@ pub const Ui = struct {
         if (!self.label(canvas.withTextRole(.heading), .{ .x = box.x, .y = box.y, .w = box.w, .h = 34 }, item.name, self.style.text, self.style.surface)) return false;
         var versions: [512]u8 = undefined;
         const version_text = std.fmt.bufPrint(&versions, "Verfuegbar: {s}  |  Installiert: {s}", .{ item.available_version orelse "unbekannt", item.installed_version orelse "nicht bestaetigt" }) catch return false;
-        if (!self.label(canvas, .{ .x = box.x, .y = box.y + 38, .w = box.w, .h = 24 }, version_text, self.style.muted, self.style.surface)) return false;
+        if (!self.text.technical(canvas, .{ .x = box.x, .y = box.y + 38, .w = box.w, .h = 24 }, version_text, self.style.muted, self.style.surface)) return false;
         const description = item.description[0..utf8Prefix(item.description, 1024)];
         if (canvas.paragraph(.{ .rect = .{ .x = box.x, .y = box.y + 68, .w = box.w, .h = 64 }, .text = description, .background = self.style.surface }, &scratch) < 0) return false;
         if (!self.label(canvas, .{ .x = box.x, .y = box.y + 136, .w = box.w, .h = 24 }, if (item.actual_path != null) "Bestehender Installationspfad" else "Installationsziel", self.style.muted, self.style.surface)) return false;
@@ -772,10 +773,29 @@ pub const Ui = struct {
     fn layoutCanvas(self: *Ui) g.Canvas {
         var info: r.abi.GuiWindowInfo = .{};
         _ = self.window.desk.guiWindowInfo(&info);
-        return g.Canvas.init(&self.window.draw, info).withStyle(self.style);
+        return self.text.bind(g.Canvas.init(&self.window.draw, info).withStyle(self.style));
+    }
+    fn selectField(self: *Ui, field: anytype, canvas: g.Canvas, rect: g.Rect, x: i32) void {
+        var pos: usize = field.cursor;
+        if (canvas.fieldTextIndex(rect, field.value(), field.cursor, x, &pos) < 0 or pos == field.cursor) return;
+        if (field.selection_anchor == null) field.selection_anchor = field.cursor;
+        field.cursor = pos;
+        self.damage.add(rect, self.painted_width, self.painted_height);
     }
     pub fn mouse(self: *Ui, message: r.app_gui.MouseMessage) void {
         const action = self.at(message.x, message.y);
+        if (message.action == .move and self.pressed != null and self.native_capture.id != 0 and (message.buttons & 1) != 0) {
+            const canvas = self.layoutCanvas();
+            const field = self.pressed.?;
+            switch (field) {
+                .search => self.selectField(&self.search, canvas, self.searchRect(canvas), message.x),
+                .path_field => {
+                    const box = self.modal(canvas).contentRect();
+                    self.selectField(&self.path_field, canvas, .{ .x = box.x, .y = box.y + 164, .w = box.w, .h = 34 }, message.x);
+                },
+                else => {},
+            }
+        }
         if (message.action == .move) {
             if (std.meta.eql(self.hover, action)) return;
             const previous = self.hover;
@@ -806,16 +826,17 @@ pub const Ui = struct {
                         self.focus.index = 2;
                         const canvas = self.layoutCanvas();
                         var position = self.search.cursor;
-                        if (canvas.textIndexChecked(self.search.value(), message.x - self.searchRect(canvas).x - g.default_metrics.text_pad_x, &position) == 0) {
+                        if (canvas.fieldTextIndex(self.searchRect(canvas), self.search.value(), self.search.cursor, message.x, &position) == 0) {
                             self.search.cursor = position;
                             self.search.clearSelection();
                         }
                     }
                     if (std.meta.activeTag(value) == .path_field) {
+                        self.focus.index = 0;
                         const canvas = self.layoutCanvas();
                         const box = self.modal(canvas).contentRect();
                         var position = self.path_field.cursor;
-                        if (canvas.textIndexChecked(self.path_field.value(), message.x - box.x - g.default_metrics.text_pad_x, &position) == 0) {
+                        if (canvas.fieldTextIndex(.{ .x = box.x, .y = box.y + 164, .w = box.w, .h = 34 }, self.path_field.value(), self.path_field.cursor, message.x, &position) == 0) {
                             self.path_field.cursor = position;
                             self.path_field.clearSelection();
                         }
@@ -876,7 +897,9 @@ pub const Ui = struct {
 test "pointer no-ops do not paint; hover damage and cancel preserve exact control bounds" {
     var window: r.Window = undefined;
     var snapshot: load.Snapshot = .{};
-    var ui = Ui{ .window = &window, .allocator = std.testing.allocator, .snapshot = &snapshot, .style = g.Style.light(), .painted_width = 680, .painted_height = 560 };
+    var fonts = @import("typography.zig").Text{ .runs = .{ .allocator = std.testing.allocator } };
+    defer fonts.deinit();
+    var ui = Ui{ .text = &fonts, .window = &window, .allocator = std.testing.allocator, .snapshot = &snapshot, .style = g.Style.light(), .painted_width = 680, .painted_height = 560 };
     ui.hit_count = 3;
     ui.hits[0] = .{ .action = .refresh, .rect = .{ .x = 490, .y = 18, .w = 166, .h = 34 } };
     ui.hits[1] = .{ .action = .next, .rect = .{ .x = 608, .y = 482, .w = 48, .h = 30 } };
@@ -939,7 +962,9 @@ test "worker progress repaints only changed visible footer text" {
     var window: r.Window = undefined;
     var snapshot: load.Snapshot = .{};
     var progress: download.Progress = .{ .total = 1024 };
-    var ui = Ui{ .window = &window, .allocator = std.testing.allocator, .snapshot = &snapshot, .style = g.Style.light(), .painted_width = 680, .painted_height = 560, .download_progress = &progress };
+    var fonts = @import("typography.zig").Text{ .runs = .{ .allocator = std.testing.allocator } };
+    defer fonts.deinit();
+    var ui = Ui{ .text = &fonts, .window = &window, .allocator = std.testing.allocator, .snapshot = &snapshot, .style = g.Style.light(), .painted_width = 680, .painted_height = 560, .download_progress = &progress };
     const status = ui.status(&ui.painted_status);
     ui.painted_status_len = status.len;
     const counts = ui.counts(&ui.painted_counts);
@@ -968,7 +993,9 @@ test "worker progress repaints only changed visible footer text" {
 test "duplicate resize preserves other damage and coordinated resize always paints" {
     var window: r.app_gui.Window = undefined;
     var snapshot: load.Snapshot = .{};
-    var view = Ui{ .window = &window, .allocator = std.testing.allocator, .snapshot = &snapshot, .style = g.Style.light(), .painted_width = 680, .painted_height = 560 };
+    var fonts = @import("typography.zig").Text{ .runs = .{ .allocator = std.testing.allocator } };
+    defer fonts.deinit();
+    var view = Ui{ .text = &fonts, .window = &window, .allocator = std.testing.allocator, .snapshot = &snapshot, .style = g.Style.light(), .painted_width = 680, .painted_height = 560 };
     view.damage.clear();
     view.resize(680, 560, false);
     try std.testing.expect(!view.needsPaint());

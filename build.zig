@@ -6,12 +6,15 @@ pub fn build(b: *std.Build) void {
     const sdk = sdk_build.sdk(b, sdk_dep, .{});
     const libraries_build = sdk_build.systemLibrariesBuild(sdk_dep) orelse return;
     const libraries_dep = sdk_dep.builder.dependencyFromBuildZig(libraries_build, .{});
-    _ = sdk.addR4MFWithOptions(b.path("module.R4MF"), .{ .zig_module_roots = &.{ sdk_dep.namedLazyPath("system_update_engine"), libraries_dep.namedLazyPath("r4std_zig_binding") } });
+    _ = sdk.addR4MFWithOptions(b.path("module.R4MF"), .{ .zig_module_roots = &.{ sdk_dep.namedLazyPath("system_update_engine"), libraries_dep.namedLazyPath("r4std_zig_binding"), libraries_dep.namedLazyPath("r4font_app_fonts") } });
     const host = sdk.createR4osModule(b.graph.host, .Debug);
     const engine = b.createModule(.{ .root_source_file = sdk_dep.namedLazyPath("system_update_engine"), .target = b.graph.host, .optimize = .Debug });
     engine.addImport("r4os", host);
     const tests = b.createModule(.{ .root_source_file = b.path("src/tests.zig"), .target = b.graph.host });
     tests.addImport("r4os", host);
+    const fonts = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4font_app_fonts"), .target = b.graph.host, .optimize = .Debug });
+    fonts.addImport("r4os", host);
+    tests.addImport("app_fonts", fonts);
     tests.addImport("system_update_engine", engine);
     const standard = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4std_zig_binding"), .target = b.graph.host, .optimize = .Debug });
     standard.addImport("r4os", host);

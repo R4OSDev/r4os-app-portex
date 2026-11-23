@@ -1,7 +1,7 @@
 R4OS_MODULE_MANIFEST=2
 KIND=R4X
 NAME=PORTEX
-VERSION=0.1.17
+VERSION=0.1.18
 LANGUAGE=Zig
 SDK_PROFILE=r4os-zig-generation2
 SOURCE=src/main.zig
@@ -16,8 +16,11 @@ IMPORT=R4NET:Query2:2
 IMPORT=R4DEV:Query2:2
 IMPORT=R4STD:Query2:2
 IMPORT=R4STD:SETTINGS_V1:1
+IMPORT=R4FONT:Query2:2
+IMPORT=R4FONT:API_V1:1
 ZIG_MODULE=system_update_engine:../../SDK/r4os/system_update_engine.zig
 ZIG_MODULE=r4std:../../Libraries/R4STD/Bindings/Zig/r4std.zig
+ZIG_MODULE=app_fonts:../../Libraries/R4FONT/Bindings/Zig/app_fonts.zig
 META=desktop.launch=hosted
 META=memory.profile=workstation
 META=memory.tag=portex

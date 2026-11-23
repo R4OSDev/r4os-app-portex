@@ -53,7 +53,7 @@ einer Ebene; Kategorien filtern die alphabetischen Karten. Eine vorgestellte
 App erscheint im normalen Entdecken nicht nochmals in der Liste. Suche findet
 sie weiterhin als regulaeren Eintrag. Der Titel lautet Portex; die aeussere
 Titelleiste zeichnet der Desktop mit den optionalen Manifestfarben.
-Die Designreferenz bleibt unter Design/Prisma.html erhalten.
+Die aktuelle Vorlage für Katalog und Paketdetails steht unter Design/Katalog.html. Portex öffnet Inter und IBM Plex Mono einmal je Instanz. Schriftmetriken bestimmen Kürzung, Mausposition und Cursor. Bei fehlenden Glyphen greift die residente Schrift.
 
 R4X-Installation ab0.89.51
 ------------------------
