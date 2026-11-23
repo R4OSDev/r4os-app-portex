@@ -87,6 +87,10 @@ pub const Ui = struct {
     pub fn invalidate(self: *Ui) void {
         self.damage.all();
     }
+    pub fn resize(self: *Ui, width: i32, height: i32, coordinated: bool) void {
+        if (self.pressed != null or self.native_capture.id != 0) self.pointerCancelled();
+        if (coordinated or width != self.painted_width or height != self.painted_height) self.invalidate();
+    }
     pub fn needsPaint(self: *const Ui) bool {
         return self.damage.active();
     }
@@ -959,4 +963,21 @@ test "worker progress repaints only changed visible footer text" {
     // Repeats that leave displayed text unchanged remain invisible.
     ui.refreshProgress();
     try std.testing.expect(!ui.needsPaint());
+}
+
+test "duplicate resize preserves other damage and coordinated resize always paints" {
+    var window: r.app_gui.Window = undefined;
+    var snapshot: load.Snapshot = .{};
+    var view = Ui{ .window = &window, .allocator = std.testing.allocator, .snapshot = &snapshot, .style = g.Style.light(), .painted_width = 680, .painted_height = 560 };
+    view.damage.clear();
+    view.resize(680, 560, false);
+    try std.testing.expect(!view.needsPaint());
+    view.damage.add(.{ .x = 10, .y = 12, .w = 20, .h = 16 }, 680, 560);
+    view.resize(680, 560, false);
+    try std.testing.expect(view.damage.count == 1 and !view.damage.full);
+    view.resize(680, 560, true);
+    try std.testing.expect(view.damage.full);
+    view.damage.clear();
+    view.resize(1000, 560, false);
+    try std.testing.expect(view.damage.full);
 }

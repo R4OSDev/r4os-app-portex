@@ -35,6 +35,7 @@ pub fn r4_app_main(app: *r.App2) i32 {
     var thread: ?r.app_resources.JoinHandle = null;
     const resources = app.resources();
     var closing = false;
+    var next_message: ?r.app_gui.Message = null;
     var exit_code: i32 = 0;
     const clock = app.clock() catch return -8;
     var progress_paint: ?r.rpc_budget.Budget = null;
@@ -268,16 +269,32 @@ pub fn r4_app_main(app: *r.App2) i32 {
                 continue;
             }
         }
-        switch (window.waitMessage(period)) {
-            .message => |message| {
-                closing = dispatch(&view, message);
-                // Bounded dispatch keeps input order and gives jobs/Close and
-                // paint another turn even under continuous pointer activity.
-                // Rebuild changed layouts before hit-testing another event.
+        const received: r.app_gui.WaitResult = if (next_message) |saved| blk: {
+            next_message = null;
+            break :blk .{ .message = saved };
+        } else window.waitMessage(period);
+        switch (received) {
+            .message => |first| {
+                var message = first;
                 var remaining: usize = 31;
-                while (!closing and !view.damage.full and remaining != 0) : (remaining -= 1) {
-                    const pending = window.pollMessage() orelse break;
-                    closing = dispatch(&view, pending);
+                while (true) {
+                    // A key or click following a resize uses the rebuilt hit map.
+                    // Keep that first ordered event for the next turn.
+                    if (message == .resize) {
+                        while (remaining != 0) {
+                            const pending = window.pollMessage() orelse break;
+                            remaining -= 1;
+                            if (pending != .resize) {
+                                next_message = pending;
+                                break;
+                            }
+                            message = pending;
+                        }
+                    }
+                    closing = dispatch(&view, message);
+                    if (closing or view.damage.full or next_message != null or remaining == 0) break;
+                    message = window.pollMessage() orelse break;
+                    remaining -= 1;
                 }
             },
             .failure => |code| {
@@ -304,10 +321,7 @@ fn due(timer: *?r.rpc_budget.Budget) r.rpc_budget.Error!bool {
 fn dispatch(view: *ui.Ui, message: r.app_gui.Message) bool {
     switch (message) {
         .close => return true,
-        .resize => {
-            view.release();
-            view.invalidate();
-        },
+        .resize => |size| view.resize(size.width, size.height, view.window.events.action_view_pending),
         .font_changed => {
             view.fontChanged();
         },
