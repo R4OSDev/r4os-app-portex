@@ -1,6 +1,6 @@
 .{
     .name = .r4os_portex,
-    .version = "0.1.20",
+    .version = "0.1.21",
     .fingerprint = 0x1c931aeeb7108226,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
@@ -9,5 +9,5 @@
             .hash = "r4os_sdk-0.64.245-NnPzAjxPGwJFOh6GXTz4-_560lehS8y61yrSQxz9j_FO",
         },
     },
-    .paths = .{ "LICENSE", "NOTICE", "README.md", "DOCUMENTATION.de.txt", "THIRD_PARTY_NOTICES.md", "Licenses", "PROVENANCE.txt", "module.R4MF", "build.zig", "build.zig.zon", "src", "Build.ps1", "Build.sh", "Build.bat", "Settings.R4S" },
+    .paths = .{ "LICENSE", "NOTICE", "README.md", "DOCUMENTATION.de.txt", "THIRD_PARTY_NOTICES.md", "Licenses", "PROVENANCE.txt", "module.R4MF", "build.zig", "build.zig.zon", "Assets", "src", "Build.ps1", "Build.sh", "Build.bat", "Settings.R4S" },
 }
