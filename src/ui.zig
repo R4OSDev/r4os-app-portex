@@ -177,7 +177,7 @@ pub const Ui = struct {
         if (!std.meta.eql(previous, self.state())) self.invalidate();
     }
     fn status(self: *const Ui, output: []u8) []const u8 {
-        return if (self.remove_progress) |progress| progress.describe(output) else if (self.pendingRemoval()) "Entfernung ausstehend: App schliessen und Wiederaufnehmen" else if (self.update_progress) |progress| progress.describe(output) else if (self.installation_progress) |progress| progress.describe(output) else if (self.download_progress) |progress| progress.describe(output) else if (self.busy) "Katalog wird geladen; die Ansicht bleibt bedienbar." else if (self.snapshot.failure) |err| std.fmt.bufPrint(output, "Bestand konnte nicht vollstaendig gelesen werden: {s}", .{@errorName(err)}) catch "Bestand unbekannt" else catalog.describe(&self.snapshot.result, output);
+        return if (self.remove_progress) |progress| progress.describe(output) else if (self.pendingRemoval()) "Entfernung ausstehend: App schließen und Wiederaufnehmen" else if (self.update_progress) |progress| progress.describe(output) else if (self.installation_progress) |progress| progress.describe(output) else if (self.download_progress) |progress| progress.describe(output) else if (self.busy) "Katalog wird geladen; die Ansicht bleibt bedienbar." else if (self.snapshot.failure) |err| std.fmt.bufPrint(output, "Bestand konnte nicht vollständig gelesen werden: {s}", .{@errorName(err)}) catch "Bestand unbekannt" else catalog.describe(&self.snapshot.result, output);
     }
     fn counts(self: *const Ui, output: []u8) []const u8 {
         if (self.download_progress) |progress| return progress.counts(output);
@@ -232,7 +232,14 @@ pub const Ui = struct {
     fn button(self: *Ui, canvas: g.Canvas, action: Action, rect: g.Rect, text: []const u8, enabled: bool, primary: bool, focused: bool) bool {
         var scratch: [512]u8 = undefined;
         const control = g.Button{ .rect = rect, .text = text, .state = if (!enabled) .disabled else if (same(self.pressed, action)) .pressed else if (same(self.hover, action)) .hover else .normal, .focused = self.active and focused, .is_default = primary };
-        return control.draw(canvas, &scratch) >= 0 and self.hit(action, rect, enabled);
+        var button_canvas = canvas;
+        if (same(action, .remove_confirm)) {
+            var danger = self.style;
+            danger.accent = 0xf4a6bd;
+            danger.accent_text = 0x361725;
+            button_canvas = canvas.withStyle(danger);
+        }
+        return control.draw(button_canvas, &scratch) >= 0 and self.hit(action, rect, enabled);
     }
     fn projection(self: *const Ui) ?*const v.Projection {
         if (self.snapshot.projection) |*p| return p;
@@ -375,7 +382,8 @@ pub const Ui = struct {
         const count_text = self.counts(&count_bytes);
         @memcpy(self.painted_counts[0..count_text.len], count_text);
         self.painted_counts_len = count_text.len;
-        if (count_text.len != 0 and !self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 76, .w = canvas.w - 180, .h = 24 }, count_text, self.style.text, self.style.background)) return false;
+        if (!self.progressLine(canvas)) return false;
+        if (count_text.len != 0 and !self.text.technical(canvas, .{ .x = 24, .y = canvas.h - 76, .w = canvas.w - 180, .h = 24 }, count_text, self.style.text, self.style.background)) return false;
         if (!self.label(canvas.withTextRole(.caption), .{ .x = 24, .y = canvas.h - 36, .w = canvas.w - 48, .h = 24 }, text, self.style.muted, self.style.background)) return false;
         if (self.category_open and !self.detail) if (self.projection()) |p| {
             const total = p.categories.len + 1;
@@ -429,17 +437,57 @@ pub const Ui = struct {
         }
         return true;
     }
+    fn modalFrame(self: *Ui, canvas: g.Canvas, dialog: g.ModalDialog) bool {
+        const rect = dialog.rect;
+        if (canvas.surface(rect, .plain) < 0) return false;
+        const base = rect.inset(16, 0);
+        return self.label(canvas.withTextRole(.caption), .{ .x = base.x, .y = rect.y + 8, .w = base.w, .h = 19 }, dialog.title, self.style.accent, self.style.surface) and
+            canvas.rect(.{ .x = base.x, .y = rect.bottom() - 67, .w = base.w, .h = 1 }, self.style.line) >= 0;
+    }
+    fn dialogBody(dialog: g.ModalDialog) g.Rect {
+        const inner = dialog.contentRect();
+        return .{ .x = dialog.rect.x + 20, .y = inner.y + 4, .w = dialog.rect.w - 40, .h = inner.h - 4 };
+    }
+    fn pathRect(self: *const Ui, canvas: g.Canvas) g.Rect {
+        const box = dialogBody(self.modal(canvas));
+        return .{ .x = box.x, .y = box.y + 164, .w = box.w, .h = 34 };
+    }
+    fn progressLine(self: *Ui, canvas: g.Canvas) bool {
+        var completed: u64 = 0;
+        var total: u64 = 0;
+        if (self.download_progress) |p| {
+            completed = p.done.load(.acquire);
+            total = p.total;
+        } else if (self.update_progress) |p| {
+            if (!p.transfer_active.load(.acquire)) return true;
+            completed = p.bytes.load(.acquire);
+            total = p.byte_total.load(.acquire);
+        }
+        if (total == 0) return true;
+        const track = g.Rect{ .x = 24, .y = canvas.h - 46, .w = canvas.w - 48, .h = 3 };
+        if (canvas.rect(track, self.style.line) < 0) return false;
+        const width: i32 = @intCast(@as(u128, @intCast(track.w)) * @min(total, completed) / total);
+        return width == 0 or canvas.rect(.{ .x = track.x, .y = track.y, .w = width, .h = track.h }, self.style.accent) >= 0;
+    }
+    fn queueFailureHint(reason: []const u8) []const u8 {
+        if (std.mem.endsWith(u8, reason, "RetriesExhausted")) {
+            if (std.mem.startsWith(u8, reason, "HTTP 503")) return "Der Paketserver ist vorübergehend nicht verfügbar.";
+            if (std.mem.startsWith(u8, reason, "HTTP 429")) return "Der Paketserver erhält zu viele Anfragen. Bitte später erneut versuchen.";
+            return "Die Übertragung ist nach mehreren Versuchen fehlgeschlagen.";
+        }
+        if (std.mem.endsWith(u8, reason, "HashMismatch")) return "Die Prüfsumme des Downloads stimmt nicht mit dem Katalog überein.";
+        return "Der Paketauftrag konnte nicht abgeschlossen werden.";
+    }
     fn paintQueue(self: *Ui, canvas: g.Canvas) bool {
         const saved = self.snapshot.update_queue orelse return false;
         const queue = saved.value;
         const dialog = g.ModalDialog.centered(canvas.bounds(), @min(720, canvas.w - 32), @min(456, canvas.h - 32), "Updateauftrag");
-        var scratch: [2048]u8 = undefined;
-        if (dialog.drawFrame(canvas, &scratch) < 0) return false;
+        if (!self.modalFrame(canvas, dialog)) return false;
         self.hit_count = 0;
-        const box = dialog.contentRect();
+        const box = dialogBody(dialog);
         var text: [1024]u8 = undefined;
-        const heading = std.fmt.bufPrint(&text, "{d}/{d} installiert | {d} ausstehend", .{ queue.installedCount(), queue.items.len, queue.items.len - queue.installedCount() }) catch return false;
-        if (!self.label(canvas, .{ .x = box.x, .y = box.y, .w = box.w, .h = 26 }, heading, self.style.text, self.style.surface)) return false;
+        const heading = std.fmt.bufPrint(&text, "{d} von {d} installiert · {d} ausstehend", .{ queue.installedCount(), queue.items.len, queue.items.len - queue.installedCount() }) catch return false;
+        if (!self.label(canvas.withTextRole(.heading), .{ .x = box.x, .y = box.y, .w = box.w, .h = 28 }, heading, self.style.text, self.style.surface)) return false;
         const first = @min(self.queue_first, queue.items.len);
         const count = @min(@as(usize, 4), queue.items.len - first);
         for (queue.items[first..][0..count], 0..) |item, n| {
@@ -451,56 +499,67 @@ pub const Ui = struct {
                 .failed => "Fehlgeschlagen",
                 .cancelled => "Abgebrochen",
             };
-            const line = std.fmt.bufPrint(&text, "{d}. {s} {s}: {s}", .{ first + n + 1, item.frozen.selection.title, item.frozen.selection.plan.version, phase }) catch return false;
             const y = box.y + 42 + @as(i32, @intCast(n)) * 70;
-            if (!self.label(canvas, .{ .x = box.x, .y = y, .w = box.w, .h = 28 }, line, self.style.text, self.style.surface)) return false;
-            if (!self.label(canvas.withTextRole(.caption), .{ .x = box.x, .y = y + 30, .w = box.w, .h = 26 }, item.failure orelse item.frozen.selection.destination, self.style.muted, self.style.surface)) return false;
+            const title = std.fmt.bufPrint(&text, "{s} · {s}", .{ item.frozen.selection.title, item.frozen.selection.plan.version }) catch return false;
+            if (canvas.rect(.{ .x = box.x, .y = y - 3, .w = box.w, .h = 1 }, self.style.line) < 0) return false;
+            if (!self.label(canvas.withTextRole(.heading), .{ .x = box.x, .y = y, .w = box.w - 175, .h = 28 }, title, self.style.text, self.style.surface)) return false;
+            const state_color = if (item.status == .failed) 0xf4a6bd else self.style.accent;
+            if (!self.label(canvas, .{ .x = box.right() - 165, .y = y, .w = 165, .h = 28 }, phase, state_color, self.style.surface)) return false;
+            if (item.status == .failed) {
+                const reason = item.failure orelse "";
+                if (!self.label(canvas, .{ .x = box.x, .y = y + 26, .w = box.w, .h = 21 }, queueFailureHint(reason), self.style.text, self.style.surface)) return false;
+                if (!self.text.technical(canvas, .{ .x = box.x, .y = y + 47, .w = box.w, .h = 18 }, reason, self.style.muted, self.style.surface)) return false;
+            } else if (!self.text.technical(canvas, .{ .x = box.x, .y = y + 30, .w = box.w, .h = 24 }, item.failure orelse item.frozen.selection.destination, self.style.muted, self.style.surface)) return false;
         }
         const bottom = dialog.rect.bottom() - 50;
         return self.button(canvas, .previous, .{ .x = box.x, .y = bottom, .w = 64, .h = 32 }, "<", first > 0, false, false) and
             self.button(canvas, .next, .{ .x = box.x + 72, .y = bottom, .w = 64, .h = 32 }, ">", first + count < queue.items.len, false, false) and
-            self.button(canvas, .detail_close, .{ .x = dialog.rect.right() - 164, .y = bottom, .w = 140, .h = 32 }, "Schliessen", true, true, false);
+            self.button(canvas, .detail_close, .{ .x = dialog.rect.right() - 164, .y = bottom, .w = 140, .h = 32 }, "Schließen", true, true, false);
     }
     fn paintDetail(self: *Ui, canvas: g.Canvas) bool {
         const item = self.row() orelse return false;
         const dialog = self.modal(canvas);
         var scratch: [2048]u8 = undefined;
-        if (dialog.drawFrame(canvas, &scratch) < 0) return false;
+        if (!self.modalFrame(canvas, dialog)) return false;
         self.hit_count = 0; // Covered background controls cannot fire.
-        const box = dialog.contentRect();
+        const box = dialogBody(dialog);
         if (self.removing) {
             var text: [1024]u8 = undefined;
             const title = std.fmt.bufPrint(&text, "{s} {s} entfernen?", .{ item.name, item.installed_version orelse "" }) catch return false;
             if (!self.label(canvas.withTextRole(.heading), .{ .x = box.x, .y = box.y, .w = box.w, .h = 40 }, title, self.style.text, self.style.surface)) return false;
-            if (!self.label(canvas, .{ .x = box.x, .y = box.y + 64, .w = box.w, .h = 32 }, item.actual_path orelse "", self.style.text, self.style.surface)) return false;
-            if (canvas.paragraph(.{ .rect = .{ .x = box.x, .y = box.y + 112, .w = box.w, .h = 120 }, .text = "Entfernt die App-Datei und ihren Inventareintrag. Eigene unveraenderte Desktop-Links werden entfernt. Nutzerdaten, Ordner und fremde oder geaenderte Links bleiben erhalten. Eine laufende App muss zuerst geschlossen werden.", .background = self.style.surface }, &scratch) < 0) return false;
+            if (!self.text.technical(canvas, .{ .x = box.x, .y = box.y + 64, .w = box.w, .h = 32 }, item.actual_path orelse "", self.style.text, self.style.surface)) return false;
+            const removal_info = "Entfernt die App-Datei und ihren Inventareintrag.\n" ++
+                "Eigene unveränderte Desktop-Links werden ebenfalls entfernt.\n" ++
+                "Nutzerdaten, Ordner und fremde oder geänderte Links bleiben erhalten.\n" ++
+                "Bitte die App vor dem Entfernen schließen.";
+            if (canvas.paragraph(.{ .rect = .{ .x = box.x, .y = box.y + 112, .w = box.w, .h = 120 }, .text = removal_info, .background = self.style.surface }, &scratch) < 0) return false;
             return self.button(canvas, .remove_cancel, .{ .x = box.x, .y = dialog.rect.bottom() - 54, .w = 180, .h = 32 }, "Abbrechen", true, false, self.focus.index == 0) and
-                self.button(canvas, .remove_confirm, .{ .x = box.right() - 200, .y = dialog.rect.bottom() - 54, .w = 200, .h = 32 }, "Jetzt entfernen", self.allowed(.uninstall, item.*), false, self.focus.index == 1);
+                self.button(canvas, .remove_confirm, .{ .x = box.right() - 200, .y = dialog.rect.bottom() - 54, .w = 200, .h = 32 }, "Jetzt entfernen", self.allowed(.uninstall, item.*), true, self.focus.index == 1);
         }
-        if (!self.label(canvas.withTextRole(.heading), .{ .x = box.x, .y = box.y, .w = box.w, .h = 34 }, item.name, self.style.text, self.style.surface)) return false;
+        if (!self.label(canvas.withTextRole(.display), .{ .x = box.x, .y = box.y, .w = box.w, .h = 36 }, item.name, self.style.text, self.style.surface)) return false;
         var versions: [512]u8 = undefined;
-        const version_text = std.fmt.bufPrint(&versions, "Verfuegbar: {s}  |  Installiert: {s}", .{ item.available_version orelse "unbekannt", item.installed_version orelse "nicht bestaetigt" }) catch return false;
+        const version_text = std.fmt.bufPrint(&versions, "Verfügbar: {s}  |  Installiert: {s}", .{ item.available_version orelse "unbekannt", item.installed_version orelse "nicht bestätigt" }) catch return false;
         if (!self.text.technical(canvas, .{ .x = box.x, .y = box.y + 38, .w = box.w, .h = 24 }, version_text, self.style.muted, self.style.surface)) return false;
         const description = item.description[0..utf8Prefix(item.description, 1024)];
         if (canvas.paragraph(.{ .rect = .{ .x = box.x, .y = box.y + 68, .w = box.w, .h = 64 }, .text = description, .background = self.style.surface }, &scratch) < 0) return false;
         if (!self.label(canvas, .{ .x = box.x, .y = box.y + 136, .w = box.w, .h = 24 }, if (item.actual_path != null) "Bestehender Installationspfad" else "Installationsziel", self.style.muted, self.style.surface)) return false;
         if (self.customizing) {
-            self.path_field.focused = self.active;
-            const field = g.Rect{ .x = box.x, .y = box.y + 164, .w = box.w, .h = 34 };
+            self.path_field.focused = self.active and self.focus.index == 0;
+            const field = self.pathRect(canvas);
             if (self.path_field.draw(canvas, field, &scratch) < 0 or !self.hit(.path_field, field, true)) return false;
-            if (!self.label(canvas, .{ .x = box.x, .y = box.y + 204, .w = box.w, .h = 24 }, if (self.path_error) |err| pathError(err) else if (self.adopting) "Vorhandene R4X-Datei angeben; technische Identitaet wird geprueft." else if (item.kind == .application) "Ordner waehlen; Originaldateiname bleibt erhalten." else "Dateiziel mit unveraendertem Originaldateinamen.", self.style.muted, self.style.surface)) return false;
-            return self.button(canvas, .path_cancel, .{ .x = dialog.rect.right() - 338, .y = dialog.rect.bottom() - 54, .w = 140, .h = 32 }, "Abbrechen", true, false, false) and self.button(canvas, .path_apply, .{ .x = dialog.rect.right() - 184, .y = dialog.rect.bottom() - 54, .w = 160, .h = 32 }, "Uebernehmen", true, true, false);
+            if (!self.label(canvas, .{ .x = box.x, .y = box.y + 204, .w = box.w, .h = 24 }, if (self.path_error) |err| pathError(err) else if (self.adopting) "Vorhandene R4X-Datei angeben; technische Identität wird geprüft." else if (item.kind == .application) "Ordner wählen. Originaldateiname bleibt erhalten." else "Dateiziel mit unverändertem Originaldateinamen.", self.style.muted, self.style.surface)) return false;
+            return self.button(canvas, .path_cancel, .{ .x = dialog.rect.right() - 338, .y = dialog.rect.bottom() - 54, .w = 140, .h = 32 }, "Abbrechen", true, false, self.focus.index == 1) and self.button(canvas, .path_apply, .{ .x = dialog.rect.right() - 184, .y = dialog.rect.bottom() - 54, .w = 160, .h = 32 }, "Übernehmen", true, true, self.focus.index == 2);
         }
-        if (!self.label(canvas, .{ .x = box.x, .y = box.y + 164, .w = box.w - 150, .h = 32 }, self.destination(item.*) orelse "Bootplan erforderlich", self.style.text, self.style.surface)) return false;
+        if (!self.text.technical(canvas, .{ .x = box.x, .y = box.y + 164, .w = box.w - 150, .h = 32 }, self.destination(item.*) orelse "Bootplan erforderlich", self.style.text, self.style.surface)) return false;
         const can_customize = item.actual_path == null and item.package_index != null and item.kind != .kernel and !self.busy;
         if (!self.button(canvas, .customize, .{ .x = box.right() - 138, .y = box.y + 164, .w = 138, .h = 32 }, "Anpassen", can_customize, false, self.focus.index == 1)) return false;
         if (!self.label(canvas, .{ .x = box.x, .y = box.y + 206, .w = box.w, .h = 24 }, item.statusText(), self.style.muted, self.style.surface)) return false;
-        if (item.kind != .application and !self.label(canvas, .{ .x = box.x, .y = box.y + 236, .w = box.w, .h = 24 }, "Aktivierung ueber Systemupdate; Neustart erforderlich.", self.style.muted, self.style.surface)) return false;
+        if (item.kind != .application and !self.label(canvas, .{ .x = box.x, .y = box.y + 236, .w = box.w, .h = 24 }, "Aktivierung über Systemupdate; Neustart erforderlich.", self.style.muted, self.style.surface)) return false;
         const can_download = !self.busy and item.package_index != null and self.snapshot.result.snapshot != null and self.snapshot.result.snapshot.?.fresh;
         if (!self.button(canvas, .download, .{ .x = box.x, .y = box.y + 268, .w = 210, .h = 32 }, "Herunterladen", can_download, false, self.focus.index == 4)) return false;
-        if (item.kind == .application and !self.button(canvas, .adopt, .{ .x = box.x + 226, .y = box.y + 268, .w = box.w - 226, .h = 32 }, "Vorhandene R4X zuordnen", can_download and !self.snapshot.pending_installation and !self.pendingRemoval() and item.status != .conflict, false, false)) return false;
+        if (item.kind == .application and !self.button(canvas, .adopt, .{ .x = box.x + 226, .y = box.y + 268, .w = box.w - 226, .h = 32 }, "Vorhandene R4X zuordnen", can_download and !self.snapshot.pending_installation and !self.pendingRemoval() and item.status != .conflict, false, self.focus.index == 5)) return false;
         const button_y = dialog.rect.bottom() - 54;
-        if (!self.button(canvas, .detail_close, .{ .x = dialog.rect.x + 24, .y = button_y, .w = 140, .h = 32 }, "Schliessen", true, false, self.focus.index == 0)) return false;
+        if (!self.button(canvas, .detail_close, .{ .x = dialog.rect.x + 24, .y = button_y, .w = 140, .h = 32 }, "Schließen", true, false, self.focus.index == 0)) return false;
         if (item.kind == .application and !self.button(canvas, .uninstall, .{ .x = dialog.rect.right() - 388, .y = button_y, .w = 180, .h = 32 }, "Deinstallieren", self.allowed(.uninstall, item.*), false, self.focus.index == 2)) return false;
         return self.button(canvas, if (item.actual_path != null) .update else .install, .{ .x = dialog.rect.right() - 194, .y = button_y, .w = 170, .h = 32 }, if (item.actual_path != null) "Aktualisieren" else "Installieren", self.allowed(if (item.actual_path != null) .update else .install, item.*), true, self.focus.index == 3);
     }
@@ -512,13 +571,13 @@ pub const Ui = struct {
     fn pathError(err: anyerror) []const u8 {
         return switch (err) {
             error.ExpectedAbsolute => "Absoluter Pfad mit Laufwerk erforderlich.",
-            error.RootTraversal => "Der Pfad verlaesst das Laufwerk.",
+            error.RootTraversal => "Der Pfad verlässt das Laufwerk.",
             error.OriginalFilenameRequired => "Der Originaldateiname muss erhalten bleiben.",
             error.TooLong, error.ComponentTooLong => "Der Zielpfad ist zu lang.",
-            error.InvalidCharacter, error.EmbeddedNul => "Der Pfad enthaelt ungueltige Zeichen.",
+            error.InvalidCharacter, error.EmbeddedNul => "Der Pfad enthält ungültige Zeichen.",
             error.Empty, error.MissingDestination => "Bitte einen Zielpfad angeben.",
-            error.OutOfMemory => "Nicht genug Speicher fuer den Zielpfad.",
-            else => "Der Zielpfad konnte nicht uebernommen werden.",
+            error.OutOfMemory => "Nicht genug Speicher für den Zielpfad.",
+            else => "Der Zielpfad konnte nicht übernommen werden.",
         };
     }
     fn execute(self: *Ui, action: Action) void {
@@ -566,6 +625,7 @@ pub const Ui = struct {
                 if (!self.path_field.setExact(self.destination(item.*) orelse "C:\\")) return;
                 self.adopting = true;
                 self.customizing = true;
+                self.focus.index = 0;
                 self.path_error = null;
             },
             .download => {
@@ -610,11 +670,12 @@ pub const Ui = struct {
                 const value = if (p.installation.path_kind == .directory) path[0..@max(3, std.mem.lastIndexOfScalar(u8, path, '\\') orelse return)] else path;
                 if (!self.path_field.setExact(value)) return;
                 self.customizing = true;
+                self.focus.index = 0;
                 self.adopting = false;
                 self.path_error = null;
             },
             .path_field => {},
-            .path_cancel => self.customizing = false,
+            .path_cancel => { self.customizing = false; self.focus.index = 1; },
             .path_apply => {
                 const p = self.package() orelse return;
                 if (self.adopting) {
@@ -689,6 +750,10 @@ pub const Ui = struct {
             },
         }
     }
+    fn isEnabled(self: *const Ui, action: Action) bool {
+        for (self.hits[0..self.hit_count]) |item| if (std.meta.eql(item.action, action)) return true;
+        return false;
+    }
     pub fn key(self: *Ui, message: r.app_gui.KeyMessage) void {
         const before = self.state();
         defer self.changed(before);
@@ -706,13 +771,24 @@ pub const Ui = struct {
             return;
         }
         if (self.customizing) {
-            if (key_value == g.Key.escape) self.customizing = false else if (key_value == g.Key.enter) self.execute(.path_apply) else _ = self.path_field.handleClipboardCodepoint(&self.window.desk, if (message.codepoint == 0) key_value else message.codepoint);
+            if (key_value == g.Key.escape) self.execute(.path_cancel) else if (key_value == g.Key.tab or key_value == g.Key.shift_tab) {
+                self.focus.index = (self.focus.index + if (key_value == g.Key.tab) @as(usize, 1) else 2) % 3;
+            } else if (key_value == g.Key.enter or (self.focus.index != 0 and key_value == ' ')) {
+                self.execute(if (self.focus.index == 1) .path_cancel else .path_apply);
+            } else if (self.focus.index == 0) {
+                _ = self.path_field.handleClipboardCodepoint(&self.window.desk, if (message.codepoint == 0) key_value else message.codepoint);
+            }
             return;
         }
         if (self.detail) {
-            if (key_value == g.Key.escape) self.execute(.detail_close) else if (key_value == g.Key.tab or key_value == g.Key.shift_tab) self.focus.index = (self.focus.index + if (key_value == g.Key.tab) @as(usize, 1) else 4) % 5 else if (key_value == g.Key.enter or key_value == ' ') {
-                if (self.focus.index == 0) self.execute(.detail_close) else if (self.focus.index == 1) self.execute(.customize) else if (self.focus.index == 4) self.execute(.download);
-            }
+            const item = self.row() orelse return;
+            const actions = [_]Action{ .detail_close, .customize, .uninstall, if (item.actual_path != null) .update else .install, .download, .adopt };
+            if (key_value == g.Key.escape) self.execute(.detail_close) else if (key_value == g.Key.tab or key_value == g.Key.shift_tab) {
+                for (0..actions.len) |_| {
+                    self.focus.index = (self.focus.index + if (key_value == g.Key.tab) @as(usize, 1) else actions.len - 1) % actions.len;
+                    if (self.isEnabled(actions[self.focus.index])) break;
+                }
+            } else if ((key_value == g.Key.enter or key_value == ' ') and self.focus.index < actions.len and self.isEnabled(actions[self.focus.index])) self.execute(actions[self.focus.index]);
             return;
         }
         if (key_value == g.Key.tab or key_value == g.Key.shift_tab) {
@@ -792,8 +868,7 @@ pub const Ui = struct {
             switch (field) {
                 .search => self.selectField(&self.search, canvas, self.searchRect(canvas), message.x),
                 .path_field => {
-                    const box = self.modal(canvas).contentRect();
-                    self.selectField(&self.path_field, canvas, .{ .x = box.x, .y = box.y + 164, .w = box.w, .h = 34 }, message.x);
+                    self.selectField(&self.path_field, canvas, self.pathRect(canvas), message.x);
                 },
                 else => {},
             }
@@ -836,9 +911,8 @@ pub const Ui = struct {
                     if (std.meta.activeTag(value) == .path_field) {
                         self.focus.index = 0;
                         const canvas = self.layoutCanvas();
-                        const box = self.modal(canvas).contentRect();
-                        var position = self.path_field.cursor;
-                        if (canvas.fieldTextIndex(.{ .x = box.x, .y = box.y + 164, .w = box.w, .h = 34 }, self.path_field.value(), self.path_field.cursor, message.x, &position) == 0) {
+                                                var position = self.path_field.cursor;
+                        if (canvas.fieldTextIndex(self.pathRect(canvas), self.path_field.value(), self.path_field.cursor, message.x, &position) == 0) {
                             self.path_field.cursor = position;
                             self.path_field.clearSelection();
                         }

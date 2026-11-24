@@ -91,8 +91,8 @@ pub const Progress = struct {
             .connecting => "Verbinden",
             .downloading => "Download",
             .retrying => "Wiederholung",
-            .verifying => "SHA-256 pruefen",
-            .ready => "Geprueft; bereit zur Installation",
+            .verifying => "SHA-256 prüfen",
+            .ready => "Geprüft; bereit zur Installation",
             .failed => "Download fehlgeschlagen",
             .cancelled => "Vom Nutzer abgebrochen",
         };

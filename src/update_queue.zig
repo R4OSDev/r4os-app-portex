@@ -135,11 +135,11 @@ pub const Progress = struct {
     pub fn describe(self: *const Progress, out: []u8) []const u8 {
         const value: Phase = @enumFromInt(self.phase.load(.acquire));
         const label = switch (value) {
-            .preparing => "Auswahl pruefen", .working => "Update ausfuehren",
+            .preparing => "Auswahl prüfen", .working => "Update ausfuehren",
             .pending_restart => "Neustart erforderlich; restliche Pakete warten",
             .installed => "Alle ausgewaehlten Updates installiert",
             .failed => "Angehalten; erfolgreiche Pakete bleiben erhalten",
-            .cancelled => "Abgebrochen; Fortsetzung moeglich",
+            .cancelled => "Abgebrochen; Fortsetzung möglich",
         };
         const cause = self.cause.load(.acquire);
         if (value == .failed and self.detail_len != 0)

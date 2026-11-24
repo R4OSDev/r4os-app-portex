@@ -52,11 +52,11 @@ pub const Progress = struct {
     pub fn describe(self: *const Progress, buffer: []u8) []const u8 {
         const label: []const u8 = switch (self.phase.load(.acquire)) {
             0 => "Entfernung vorbereiten",
-            1 => "App zuerst schliessen, dann Wiederaufnehmen",
-            2 => "App entfernt; eigene Verknuepfungen abgleichen",
+            1 => "App zuerst schließen, dann Wiederaufnehmen",
+            2 => "App entfernt; eigene Verknüpfungen abgleichen",
             3 => "App entfernt; Nutzerdaten bleiben erhalten",
-            4 => "Entfernung vor Dateiaenderung abgebrochen",
-            6 => "App entfernt; geaenderte Links und Nutzerdaten erhalten",
+            4 => "Entfernung vor Dateiänderung abgebrochen",
+            6 => "App entfernt; geänderte Links und Nutzerdaten erhalten",
             else => "Entfernung nicht abgeschlossen",
         };
         const cause = self.cause.load(.acquire);

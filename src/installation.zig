@@ -25,13 +25,13 @@ pub const Progress = struct {
     pub fn describe(self: *const Progress, buffer: []u8) []const u8 {
         const phase: Phase = @enumFromInt(self.phase.load(.acquire));
         const label = switch (phase) {
-            .downloading => "Originaldatei laden und pruefen",
+            .downloading => "Originaldatei laden und prüfen",
             .recording => "Installationsauftrag sichern",
             .installing => "Update-Backend installiert",
             .pending_restart => "Fuer Neustart vorbereitet; noch nicht aktiv",
-            .linking => "Desktop-Verknuepfung erstellen",
+            .linking => "Desktop-Verknüpfung erstellen",
             .binding => "Tatsaechlichen Bestand zuordnen",
-            .installed => "Installation und Zuordnung bestaetigt",
+            .installed => "Installation und Zuordnung bestätigt",
             .failed => "Installation nicht abgeschlossen",
             .cancelled => "Vor der Installation abgebrochen",
         };
