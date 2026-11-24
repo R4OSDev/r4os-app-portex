@@ -214,25 +214,25 @@ pub fn refresh(app: *r4os.App2, allocator: Allocator, stop: *r4os.app_contract.S
 pub fn describe(result: *const Result, output: []u8) [:0]const u8 {
     if (result.failure) |failure| {
         const reason = switch (failure.reason) {
-            .configuration => "Serverkonfiguration ungueltig",
+            .configuration => "Serverkonfiguration ungültig",
             .registration => "Registrierung fehlgeschlagen",
-            .registration_credentials => "Serverzugang fehlt oder ist ungueltig",
+            .registration_credentials => "Serverzugang fehlt oder ist ungültig",
             .registration_setup => "Automatische Servereinrichtung fehlgeschlagen",
             .registration_storage => "Serverzugang konnte nicht gespeichert werden",
             .registration_unavailable => "R4SRV nicht erreichbar",
-            .registration_response => "Registrierungsantwort ungueltig",
+            .registration_response => "Registrierungsantwort ungültig",
             .transport => "Verbindung fehlgeschlagen",
             .blocked => "Zugriff vom Server gesperrt",
-            .unavailable => "Softwarekatalog nicht verfuegbar",
-            .conflict => "Widerspruechliche Serverfreigabe",
+            .unavailable => "Softwarekatalog nicht verfügbar",
+            .conflict => "Widersprüchliche Serverfreigabe",
             .unauthorized => "Registrierung nicht akzeptiert",
             .invalid_cache => "Keine passende gespeicherte Katalogansicht",
-            .server_error => "Server voruebergehend nicht nutzbar",
+            .server_error => "Server vorübergehend nicht nutzbar",
             .unexpected_status => "Unerwartete Serverantwort",
-            .invalid_catalog => "Softwarekatalog ungueltig",
-            .insecure_response => "Unzulaessige Antwortadresse",
+            .invalid_catalog => "Softwarekatalog ungültig",
+            .insecure_response => "Unzulässige Antwortadresse",
             .cancelled => "Abgebrochen",
-            .unavailable_web => "HTTPS nicht verfuegbar",
+            .unavailable_web => "HTTPS nicht verfügbar",
         };
         const detail = if (failure.transport) |e| @tagName(e) else if (failure.cause) |e| @errorName(e) else "";
         const prefix = if (result.catalogState() == .stale) "Veralteter Katalog | " else "";
@@ -240,10 +240,10 @@ pub fn describe(result: *const Result, output: []u8) [:0]const u8 {
         return std.fmt.bufPrintZ(output, "{s}{s}; HTTP {d} {s}", .{ prefix, reason, failure.http_status, detail }) catch "Katalogabruf fehlgeschlagen";
     }
     if (result.snapshot) |s| return std.fmt.bufPrintZ(output, "Katalog aktuell: {d} Pakete{s}{s}{s}", .{
-        s.catalog.packages.len,                                if (s.cached) " (unveraendert)" else "", if (result.cache_error != null) "; Cachefehler: " else "",
+        s.catalog.packages.len,                                if (s.cached) " (unverändert)" else "", if (result.cache_error != null) "; Cachefehler: " else "",
         if (result.cache_error) |err| @errorName(err) else "",
     }) catch "Katalog geladen";
-    return "Kein Katalog verfuegbar";
+    return "Kein Katalog verfügbar";
 }
 
 fn refreshImpl(app: *r4os.App2, allocator: Allocator, stop: *r4os.app_contract.StopFlag) !Result {

@@ -643,7 +643,7 @@ test "304 requires the actual validated conditional cache and remains a successf
     try std.testing.expect(result.failure == null and result.snapshot.?.fresh and result.snapshot.?.cached);
     try std.testing.expectEqual(@as(usize, 1), transport.conditional);
     var description: [256]u8 = undefined;
-    try std.testing.expectEqualStrings("Katalog aktuell: 0 Pakete (unveraendert)", client.describe(&result, &description));
+    try std.testing.expectEqualStrings("Katalog aktuell: 0 Pakete (unverändert)", client.describe(&result, &description));
     var missing = try client.retrieve(&transport, allocator, null);
     defer missing.deinit();
     try std.testing.expectEqual(client.Reason.invalid_cache, missing.failure.?.reason);

@@ -281,8 +281,8 @@ pub const Ui = struct {
         var result: [3]g.Rect = undefined;
         var x: i32 = 24;
         for (kinds, 0..) |name, i| {
-            const width = @max(84, canvas.textWidthZ(name.ptr) + self.style.padding * 2 + 4);
-            result[i] = .{ .x = x, .y = 112, .w = width, .h = 34 };
+            const width = @max(76, canvas.textWidthZ(name.ptr) + self.style.padding * 2 + 8);
+            result[i] = .{ .x = x, .y = 100, .w = width, .h = 32 };
             x += width + 8;
         }
         self.type_rects = result;
@@ -290,7 +290,7 @@ pub const Ui = struct {
     }
     fn searchRect(self: *Ui, canvas: g.Canvas) g.Rect {
         const width = @min(320, canvas.w - self.typeRects(canvas)[2].right() - 40);
-        return .{ .x = canvas.w - width - 24, .y = 112, .w = width, .h = 34 };
+        return .{ .x = canvas.w - width - 24, .y = 100, .w = width, .h = 32 };
     }
     fn modal(_: *const Ui, canvas: g.Canvas) g.ModalDialog {
         return g.ModalDialog.centered(canvas.bounds(), @min(720, canvas.w - 32), @min(456, canvas.h - 32), "Paketdetails");
@@ -317,16 +317,14 @@ pub const Ui = struct {
         return null;
     }
     fn hero(self: *Ui, canvas: g.Canvas, rect: g.Rect, index: usize, item: v.Row) bool {
-        var bytes: [256]u8 = undefined;
-        const stops = [_]r.gui_shapes.GradientStop{ .{ .position = 0, .argb = 0xff341f4a }, .{ .position = 0.72, .argb = 0xff341f4a }, .{ .position = 1, .argb = 0xff7950d0 } };
-        const shape = r.gui_shapes.RoundedRect{ .x = 0, .y = 0, .w = @floatFromInt(rect.w), .h = @floatFromInt(rect.h), .radii = .{ .top_left_x = 12, .top_left_y = 12, .top_right_x = 12, .top_right_y = 12, .bottom_left_x = 12, .bottom_left_y = 12, .bottom_right_x = 12, .bottom_right_y = 12 } };
-        const payload = r.gui_shapes.gradientRoundedRect(&bytes, shape, .{ .start = .{ .x = 0, .y = 0 }, .end = .{ .x = @floatFromInt(rect.w), .y = 0 }, .stops = &stops }) catch return false;
-        const command = r.gui_shapes.command(r.abi.gui_frame_command_kind_gradient_rounded_rect, rect.x, rect.y, @intCast(rect.w), @intCast(rect.h), 0, payload.len) catch return false;
-        if (canvas.frameCommand(command, payload) < 0) return false;
-        if (!self.label(canvas.withTextRole(.caption), .{ .x = rect.x + 20, .y = rect.y + 12, .w = rect.w - 200, .h = 22 }, "Vorgestellt", 0xd8c5f8, 0x341f4a)) return false;
-        if (!self.label(canvas.withTextRole(.heading), .{ .x = rect.x + 20, .y = rect.y + 38, .w = rect.w - 200, .h = 34 }, item.name, 0xf7f0ff, 0x341f4a)) return false;
-        if (!self.label(canvas, .{ .x = rect.x + 20, .y = rect.y + 78, .w = rect.w - 200, .h = 24 }, item.category, 0xd8c5f8, 0x341f4a)) return false;
-        return self.button(canvas, .{ .row = index }, .{ .x = rect.right() - 154, .y = rect.y + 44, .w = 130, .h = 36 }, "Details", true, false, self.focus.index == 4 and self.selected == index);
+        const panel = 0x382c49;
+        if (canvas.rect(rect, panel) < 0 or canvas.rect(.{ .x = rect.x, .y = rect.y, .w = 3, .h = rect.h }, self.style.accent) < 0) return false;
+        const content = rect.inset(18, 8);
+        const width = content.w - 126;
+        if (!self.label(canvas.withTextRole(.caption), .{ .x = content.x, .y = content.y, .w = width, .h = 18 }, "Vorgestellt", self.style.muted, panel)) return false;
+        if (!self.label(canvas.withTextRole(.display), .{ .x = content.x, .y = content.y + 19, .w = width, .h = 33 }, item.name, self.style.text, panel)) return false;
+        if (!self.label(canvas.withTextRole(.caption), .{ .x = content.x, .y = content.y + 54, .w = width, .h = 19 }, item.category, self.style.muted, panel)) return false;
+        return self.button(canvas, .{ .row = index }, .{ .x = rect.right() - 124, .y = rect.y + 29, .w = 106, .h = 32 }, "Details", true, false, self.focus.index == 4 and self.selected == index);
     }
     pub fn paint(self: *Ui) bool {
         const requested = self.damage;
@@ -348,20 +346,24 @@ pub const Ui = struct {
         self.hit_count = 0;
         if (canvas.clear(self.style.background) < 0) return false;
         if (!self.label(canvas.withTextRole(.display), .{ .x = 24, .y = 14, .w = 230, .h = 38 }, "Portex", self.style.text, self.style.background)) return false;
-        if (!self.button(canvas, if (self.busy) .cancel else .refresh, .{ .x = canvas.w - 190, .y = 18, .w = 166, .h = 34 }, if (self.busy) "Abbrechen" else "Neu laden", true, false, self.focus.index == 5)) return false;
-        if ((self.snapshot.pending_installation or self.pendingUpdates() or self.pendingRemoval()) and !self.busy and !self.button(canvas, .resume_install, .{ .x = canvas.w - 428, .y = 18, .w = 226, .h = 34 }, if (self.restartReady()) "Neustart starten" else "Wiederaufnehmen", true, true, false)) return false;
+        if (!self.button(canvas, if (self.busy) .cancel else .refresh, .{ .x = canvas.w - 154, .y = 15, .w = 130, .h = 32 }, if (self.busy) "Abbrechen" else "Neu laden", true, false, self.focus.index == 5)) return false;
+        if ((self.snapshot.pending_installation or self.pendingUpdates() or self.pendingRemoval()) and !self.busy and !self.button(canvas, .resume_install, .{ .x = canvas.w - 378, .y = 15, .w = 212, .h = 32 }, if (self.restartReady()) "Neustart starten" else "Wiederaufnehmen", true, true, false)) return false;
         var scratch: [1024]u8 = undefined;
-        const navigation = canvas.layoutTabs(.{ .rect = .{ .x = 22, .y = 60, .w = canvas.w - 44, .h = 34 }, .items = &tabs, .selected_index = @intFromEnum(self.tab), .focused = self.active and self.focus.index == 0 });
+        const navigation = canvas.layoutTabs(.{ .rect = .{ .x = 22, .y = 53, .w = canvas.w - 44, .h = 31 }, .items = &tabs, .selected_index = @intFromEnum(self.tab), .focused = self.active and self.focus.index == 0 });
         if (navigation.draw(canvas, &scratch) < 0) return false;
         for (0..3) |i| if (!self.hit(.{ .tab = i }, navigation.tabRect(i), true)) return false;
+        const chosen = navigation.tabRect(@intFromEnum(self.tab));
+        if (canvas.rect(.{ .x = 24, .y = 85, .w = canvas.w - 48, .h = 1 }, self.style.line) < 0 or
+            canvas.rect(.{ .x = chosen.x + 3, .y = 84, .w = chosen.w - 6, .h = 2 }, self.style.accent) < 0) return false;
         const type_rects = self.typeRects(canvas);
         for (kinds, 0..) |name, i| if (!self.button(canvas, .{ .kind = i }, type_rects[i], name, true, i == @intFromEnum(self.kind), self.focus.index == 1 and i == @intFromEnum(self.kind))) return false;
         self.search.focused = self.active and self.focus.index == 2 and !self.detail;
         if (self.search.draw(canvas, self.searchRect(canvas), &scratch) < 0 or !self.hit(.search, self.searchRect(canvas), true)) return false;
-        if (self.search.value().len == 0 and !self.search.focused and !self.label(canvas, self.searchRect(canvas).inset(8, 4), "Suchen...", self.style.muted, self.style.surface)) return false;
-        if (!self.button(canvas, .category_toggle, .{ .x = 24, .y = 158, .w = 260, .h = 32 }, self.category() orelse "Alle Kategorien", self.projection() != null, false, self.focus.index == 3)) return false;
-        if (self.tab == .updates and !self.button(canvas, .update_all, .{ .x = canvas.w - 264, .y = 158, .w = 240, .h = 32 }, "Alle aktualisieren", self.allowed(.update_all, null), true, false)) return false;
+        if (self.search.value().len == 0 and !self.search.focused and !self.label(canvas, self.searchRect(canvas).inset(8, 4), "Pakete suchen", self.style.muted, self.style.surface)) return false;
+        if (!self.button(canvas, .category_toggle, .{ .x = 24, .y = 145, .w = 200, .h = 30 }, self.category() orelse "Alle Kategorien", self.projection() != null, false, self.focus.index == 3)) return false;
+        if (self.tab == .updates and !self.button(canvas, .update_all, .{ .x = canvas.w - 224, .y = 145, .w = 200, .h = 30 }, "Alle aktualisieren", self.allowed(.update_all, null), true, false)) return false;
         if (!self.paintRows(canvas)) return false;
+        if (canvas.rect(.{ .x = 24, .y = canvas.h - 42, .w = canvas.w - 48, .h = 1 }, self.style.line) < 0) return false;
         if (!self.button(canvas, .previous, .{ .x = canvas.w - 132, .y = canvas.h - 78, .w = 48, .h = 30 }, "<", self.first > 0, false, false) or !self.button(canvas, .next, .{ .x = canvas.w - 72, .y = canvas.h - 78, .w = 48, .h = 30 }, ">", self.first + self.page_size < self.visible_count, false, false)) return false;
         var status_bytes: [768]u8 = undefined;
         const text = self.status(&status_bytes);
@@ -380,7 +382,7 @@ pub const Ui = struct {
             const count = @min(6, total - @min(self.category_first, total));
             for (0..count) |n| {
                 const i = self.category_first + n;
-                if (!self.button(canvas, .{ .category = i }, .{ .x = 24, .y = 192 + @as(i32, @intCast(n)) * 32, .w = 260, .h = 32 }, if (i == 0) "Alle Kategorien" else p.categories[i - 1], true, i == self.category_index, self.focus.index == 3 and i == self.category_index)) return false;
+                if (!self.button(canvas, .{ .category = i }, .{ .x = 24, .y = 176 + @as(i32, @intCast(n)) * 32, .w = 222, .h = 32 }, if (i == 0) "Alle Kategorien" else p.categories[i - 1], true, i == self.category_index, self.focus.index == 3 and i == self.category_index)) return false;
             }
         };
         if (self.detail and !self.paintDetail(canvas)) return false;
@@ -390,16 +392,16 @@ pub const Ui = struct {
     }
     fn paintRows(self: *Ui, canvas: g.Canvas) bool {
         self.visible_count = 0;
-        const pending_text = if (self.busy) "Katalog und Bestand werden geladen..." else if (self.snapshot.result.catalogState() == .missing) "Kein Katalog verfuegbar" else "Ansicht nicht verfuegbar; bitte neu laden";
+        const pending_text = if (self.busy) "Katalog und Bestand werden geladen …" else if (self.snapshot.result.catalogState() == .missing) "Kein Katalog verfügbar" else "Ansicht nicht verfügbar. Bitte neu laden.";
         const p = self.projection() orelse return self.label(canvas, .{ .x = 24, .y = 220, .w = canvas.w - 48, .h = 32 }, pending_text, self.style.muted, self.style.background);
         const featured_index = self.featured(p);
-        const list_y: i32 = if (featured_index != null) 350 else 210;
-        if (featured_index) |i| if (!self.hero(canvas, .{ .x = 24, .y = 210, .w = canvas.w - 48, .h = 124 }, i, p.rows[i])) return false;
+        const list_y: i32 = if (featured_index != null) 291 else 188;
+        if (featured_index) |i| if (!self.hero(canvas, .{ .x = 24, .y = 188, .w = canvas.w - 48, .h = 90 }, i, p.rows[i])) return false;
         const columns: usize = if (canvas.w >= 1000) 2 else 1;
-        const available_height = @max(88, canvas.h - list_y - 88);
-        const rows: usize = @intCast(@max(1, @divTrunc(available_height + 12, 100)));
+        const available_height = @max(64, canvas.h - list_y - 87);
+        const rows: usize = @intCast(@max(1, @divTrunc(available_height + 8, 72)));
         self.page_size = @min(rows * columns, 16);
-        const grid = g.TileGrid{ .rect = .{ .x = 24, .y = list_y, .w = canvas.w - 48, .h = available_height }, .min_width = if (columns == 2) @divTrunc(canvas.w - 60, 2) else canvas.w - 48, .gap = 12, .row_height = 88, .count = self.page_size };
+        const grid = g.TileGrid{ .rect = .{ .x = 24, .y = list_y, .w = canvas.w - 48, .h = available_height }, .min_width = if (columns == 2) @divTrunc(canvas.w - 56, 2) else canvas.w - 48, .gap = 8, .row_height = 64, .count = self.page_size };
         var scratch: [1024]u8 = undefined;
         for (p.rows, 0..) |item, i| {
             if (!self.isVisible(item) or featured_index == i) continue;
@@ -409,17 +411,17 @@ pub const Ui = struct {
             const rect = grid.itemRect(position - self.first);
             const action = Action{ .row = i };
             var text: [512]u8 = undefined;
-            const subtitle = std.fmt.bufPrint(&text, "{s} | {s}{s}", .{ item.category, item.statusText(), if (!p.fresh and item.package_index != null) " (Cache)" else "" }) catch return false;
-            const card = g.Card{ .rect = rect, .title = item.name, .subtitle = subtitle, .state = if (same(self.pressed, action)) .pressed else if (same(self.hover, action)) .hover else .normal, .selected = self.selected == i, .focused = self.active and self.focus.index == 4 and self.selected == i, .icon_width = 36 };
+            const subtitle = std.fmt.bufPrint(&text, "{s} · {s}{s}", .{ item.category, item.statusText(), if (!p.fresh and item.package_index != null) " (Cache)" else "" }) catch return false;
+            const card = g.Card{ .rect = rect, .title = item.name, .subtitle = subtitle, .state = if (same(self.pressed, action)) .pressed else if (same(self.hover, action)) .hover else .normal, .selected = self.selected == i, .focused = self.active and self.focus.index == 4 and self.selected == i, .icon_width = 32, .title_role = .heading };
             if (card.draw(canvas, &scratch) < 0 or !self.hit(action, rect, true)) return false;
             const icon = card.iconRect(self.style);
-            if (canvas.surface(icon, .selected) < 0 or !self.label(canvas, icon, if (item.kind) |kind| switch (kind) {
+            if (canvas.rect(icon, self.style.tint) < 0 or canvas.label(.{ .rect = icon, .alignment = .center, .text = if (item.kind) |kind| switch (kind) {
                 .application => "A",
                 .library => "L",
                 .kernel => "K",
-            } else "?", self.style.accent, self.style.tint)) return false;
+            } else "?", .fg = self.style.accent, .bg = self.style.tint }, &scratch) < 0) return false;
         }
-        const empty_text = if (self.tab != .installed and self.snapshot.result.catalogState() == .missing) "Kein Katalog verfuegbar" else "Keine passenden Pakete";
+        const empty_text = if (self.tab != .installed and self.snapshot.result.catalogState() == .missing) "Kein Katalog verfügbar" else "Keine passenden Pakete";
         if (self.visible_count == 0 and featured_index == null and !self.label(canvas, .{ .x = 24, .y = 220, .w = canvas.w - 48, .h = 32 }, empty_text, self.style.muted, self.style.background)) return false;
         if (self.first >= self.visible_count and self.first > 0) {
             self.first = 0;

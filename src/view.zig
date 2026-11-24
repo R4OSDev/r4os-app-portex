@@ -21,13 +21,13 @@ pub const Row = struct {
 
     pub fn statusText(self: Row) []const u8 {
         return switch (self.status) {
-            .available => "Verfuegbar",
+            .available => "Verfügbar",
             .installed => "Installiert",
-            .update => "Update verfuegbar",
-            .pending_restart => "Fuer Neustart vorbereitet",
-            .unavailable => "Serverpaket nicht verfuegbar",
+            .update => "Update verfügbar",
+            .pending_restart => "Für Neustart vorbereitet",
+            .unavailable => "Serverpaket nicht verfügbar",
             .local => "Lokal, ohne Katalogeintrag",
-            .unverified => "Gespeicherte Zuordnung: Bestand pruefen",
+            .unverified => "Gespeicherte Zuordnung: Bestand prüfen",
             .conflict => "Mehrdeutiger oder abweichender Bestand",
         };
     }
@@ -88,7 +88,7 @@ pub const Projection = struct {
         for (catalog.unavailable) |unavailable| {
             const b = bindings.find(unavailable.package_id);
             for (rows.items) |row| if (std.mem.eql(u8, row.package_id, unavailable.package_id)) return error.DuplicateAvailability;
-            try rows.append(a, try copyRow(a, .{ .package_id = unavailable.package_id, .kind = if (b) |v| v.package_type else null, .target = if (b) |v| v.target else "", .name = unavailable.package_id, .description = unavailable.reason, .category = "Nicht verfuegbar", .installed_version = if (b) |v| v.installed_version else null, .actual_path = if (b) |v| v.actual_path else null, .status = .unavailable }));
+            try rows.append(a, try copyRow(a, .{ .package_id = unavailable.package_id, .kind = if (b) |v| v.package_type else null, .target = if (b) |v| v.target else "", .name = unavailable.package_id, .description = unavailable.reason, .category = "Nicht verfügbar", .installed_version = if (b) |v| v.installed_version else null, .actual_path = if (b) |v| v.actual_path else null, .status = .unavailable }));
         }
         for (bindings.bindings) |binding| {
             var seen = false;
